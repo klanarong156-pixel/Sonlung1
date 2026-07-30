@@ -1,0 +1,66 @@
+{
+  "name": "สวนลุงนะ Smart Farm - Admin V4",
+  "short_name": "Smart Farm",
+  "description": "ระบบจัดการฟาร์มอัจฉริยะด้วย ESP8266 และ MQTT",
+  "start_url": "/index.html",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#10b981",
+  "background_color": "#f0fdf4",
+  "categories": ["agriculture", "productivity"],
+  "screenshots": [
+    {
+      "src": "suanlungna_icon_512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "form_factor": "wide"
+    },
+    {
+      "src": "suanlungna_icon_180.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "form_factor": "narrow"
+    }
+  ],
+  "icons": [
+    {
+      "src": "suanlungna_icon_180.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "suanlungna_icon_512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "เปิด-ปิดปั๊มน้ำ",
+      "short_name": "ควบคุมปั๊ม",
+      "description": "ควบคุมปั๊มน้ำได้อย่างรวดเร็ว",
+      "url": "/index.html?mode=pump",
+      "icons": [
+        {
+          "src": "suanlungna_icon_180.png",
+          "sizes": "180x180"
+        }
+      ]
+    },
+    {
+      "name": "ตั้งค่าตารางเวลา",
+      "short_name": "ตั้งเวลา",
+      "description": "ตั้งค่าเวลารดน้ำ",
+      "url": "/index.html?mode=schedule",
+      "icons": [
+        {
+          "src": "suanlungna_icon_180.png",
+          "sizes": "180x180"
+        }
+      ]
+    }
+  ]
+}

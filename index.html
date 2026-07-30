@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="th" class="notranslate">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🌱 สวนลุงนะ Smart Farm - Admin V6</title>
+    <meta name="theme-color" content="#10b981">
+    <link rel="manifest" href="manifest.json">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        :root {
+            --primary: #10b981;
+            --primary-dark: #059669;
+            --primary-light: #6ee7b7;
+            --bg-light: #f8fafc;
+            --bg-dark: #0f172a;
+            --surface-light: #ffffff;
+            --surface-dark: #1e293b;
+            --text-light: #1e293b;
+            --text-dark: #f1f5f9;
+            --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        body {
+            font-family: 'Kanit', sans-serif;
+            background: var(--bg-light);
+            color: var(--text-light);
+            transition: var(--transition);
+            overflow-x: hidden;
+        }
+        body.dark-mode { background: var(--bg-dark); color: var(--text-dark); }
+
+        /* SPLASH SCREEN */
+        #splashScreen {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 9999;
+            background: linear-gradient(135deg, #10b981, #059669);
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            animation: fadeOutSplash 0.6s ease-in-out 2.4s forwards;
+        }
+        @keyframes fadeOutSplash { 0% { opacity: 1; visibility: visible; } 100% { opacity: 0; visibility: hidden; } }
+        @keyframes bounceIn { 0% { transform: scale(0.3); opacity: 0; } 50% { opacity: 1; } 70% { transform: scale(1.05); } 100% { transform: scale(1); } }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #splashScreen img { width: 120px; height: 120px; border-radius: 32px; margin-bottom: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.3); animation: bounceIn 0.8s ease-out; }
+        #splashScreen h1 { font-size: 28px; font-weight: 700; color: white; margin-bottom: 8px; }
+        #splashScreen p { font-size: 14px; color: rgba(255,255,255,0.8); margin-bottom: 32px; }
+        #splashScreen .spinner { width: 40px; height: 40px; border: 3px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 1s linear infinite; }
+
+        /* AUTH PAGE */
+        #loginPage {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 5000;
+            background: linear-gradient(135deg, #10b981, #059669);
+            display: flex; align-items: center; justify-content: center; padding: 20px;
+        }
+        .login-card {
+            background: white; width: 100%; max-width: 400px; padding: 40px 32px; border-radius: 32px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2); text-align: center;
+        }
+        body.dark-mode .login-card { background: var(--surface-dark); }
+        .login-card img { width: 80px; height: 80px; border-radius: 20px; margin: 0 auto 20px; display: block; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
+        .login-title { font-size: 24px; font-weight: 700; margin-bottom: 8px; }
+        .login-subtitle { font-size: 14px; opacity: 0.6; margin-bottom: 32px; }
+
+        /* PAGES & NAV */
+        .page { display: none; padding-bottom: 100px; animation: fadeIn 0.4s ease; }
+        .page.active { display: block; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        .bottom-nav {
+            position: fixed; bottom: 0; left: 0; right: 0;
+            background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(20px);
+            display: flex; justify-content: space-around; padding: 12px 0;
+            box-shadow: 0 -4px 20px rgba(0,0,0,0.05); z-index: 1000; border-top: 1px solid rgba(0,0,0,0.05);
+        }
+        body.dark-mode .bottom-nav { background: rgba(30, 41, 59, 0.8); border-color: rgba(255,255,255,0.05); }
+        .nav-item { display: flex; flex-direction: column; align-items: center; gap: 4px; color: #94a3b8; cursor: pointer; transition: var(--transition); flex: 1; }
+        .nav-item.active { color: var(--primary); }
+        .nav-icon { font-size: 22px; }
+        .nav-label { font-size: 11px; font-weight: 500; }
+
+        /* UI COMPONENTS */
+        .container { padding: 0 20px; max-width: 800px; margin: 0 auto; }
+        .header { padding: 40px 20px 20px; background: linear-gradient(135deg, var(--primary), var(--primary-dark)); color: white; border-radius: 0 0 32px 32px; margin-bottom: 24px; box-shadow: var(--shadow-md); }
+        .header-content { display: flex; align-items: center; gap: 12px; }
+        .header-logo { width: 50px; height: 50px; border-radius: 12px; }
+        .header-text h2 { font-size: 18px; margin: 0; }
+        .header-text p { font-size: 12px; opacity: 0.9; }
+        .card { background: var(--surface-light); border-radius: 24px; padding: 24px; margin-bottom: 20px; box-shadow: var(--shadow-md); border: 1px solid rgba(0,0,0,0.02); }
+        body.dark-mode .card { background: var(--surface-dark); border-color: rgba(255,255,255,0.05); }
+        .section-title { font-size: 17px; font-weight: 700; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; color: var(--primary); }
+
+        .btn {
+            width: 100%; padding: 16px; border: none; border-radius: 18px; font-family: 'Kanit', sans-serif; font-weight: 700; cursor: pointer; transition: var(--transition);
+            display: flex; align-items: center; justify-content: center; gap: 8px; color: white; margin-bottom: 12px;
+        }
+        .btn-primary { background: var(--primary); box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3); }
+        .btn-danger { background: #ef4444; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3); }
+        .btn-outline { background: transparent; border: 2px solid var(--primary); color: var(--primary); }
+        .btn:active { transform: scale(0.96); }
+
+        .input-control {
+            width: 100%; padding: 14px; border-radius: 14px; border: 2px solid rgba(0,0,0,0.05); background: rgba(0,0,0,0.02); font-family: 'Kanit', sans-serif; font-size: 15px; color: inherit; transition: var(--transition); margin-bottom: 16px;
+        }
+        body.dark-mode .input-control { background: rgba(255,255,255,0.03); border-color: rgba(255,255,255,0.05); }
+        .input-control:focus { border-color: var(--primary); outline: none; background: white; }
+
+        /* STATUS GRID */
+        .status-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px;
+        }
+        .status-box {
+            background: var(--surface-light); padding: 16px; border-radius: 16px; text-align: center; box-shadow: var(--shadow-md);
+        }
+        body.dark-mode .status-box { background: var(--surface-dark); }
+        .status-box .label { font-size: 12px; opacity: 0.7; margin-bottom: 8px; }
+        .status-box .value { font-size: 24px; font-weight: 700; color: var(--primary); }
+
+        /* CHARTS */
+        .chart-container { position: relative; height: 350px; margin-bottom: 20px; }
+
+        /* LOG */
+        .log-container {
+            background: var(--surface-light); border-radius: 16px; padding: 16px; max-height: 300px; overflow-y: auto;
+        }
+        body.dark-mode .log-container { background: var(--surface-dark); }
+        .log-item {
+            padding: 12px; border-bottom: 1px solid rgba(0,0,0,0.05); font-size: 13px;
+        }
+        body.dark-mode .log-item { border-color: rgba(255,255,255,0.05); }
+        .log-time { color: var(--primary); font-weight: 700; }
+        .log-message { opacity: 0.8; }
+
+        /* ADMIN */
+        .user-list { list-style: none; }
+        .user-item {
+            background: var(--surface-light); padding: 16px; border-radius: 16px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;
+        }
+        body.dark-mode .user-item { background: var(--surface-dark); }
+        .user-badge { background: var(--primary); color: white; padding: 4px 8px; border-radius: 8px; font-size: 11px; font-weight: 700; }
+
+        .toast {
+            position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%); background: var(--primary); color: white; padding: 16px 24px; border-radius: 24px; box-shadow: 0 8px 24px rgba(0,0,0,0.2); z-index: 2000; animation: slideUp 0.3s ease;
+        }
+        @keyframes slideUp { from { transform: translateX(-50%) translateY(100px); opacity: 0; } to { transform: translateX(-50%) translateY(0); opacity: 1; } }
+
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body class="notranslate">
+
+    <!-- SPLASH SCREEN -->
+    <div id="splashScreen" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 9999; background: linear-gradient(135deg, #10b981, #059669); display: flex; flex-direction: column; align-items: center; justify-content: center; animation: fadeOutSplash 0.6s ease-in-out 2.4s forwards;">
+        <div style="text-align: center;">
+            <img src="suanlungna_icon_512.png" alt="Smart Farm Logo">
+            <h1>สวนลุงนะ</h1>
+            <p>Smart Farm Admin V6</p>
+            <div class="spinner"></div>
+        </div>
+    </div>
+
+    <!-- LOGIN PAGE -->
+    <div id="loginPage">
+        <div class="login-card">
+            <img src="suanlungna_icon_180.png" alt="Smart Farm Logo">
+            <h1 class="login-title">สวนลุงนะ Smart Farm</h1>
+            <p class="login-subtitle">กรุณาเข้าสู่ระบบเพื่อจัดการฟาร์มของคุณ</p>
+            <input type="email" id="loginEmail" class="input-control" placeholder="อีเมล">
+            <input type="password" id="loginPass" class="input-control" placeholder="รหัสผ่าน">
+            <button class="btn btn-primary" onclick="handleLogin()">เข้าสู่ระบบ</button>
+            <p style="font-size: 12px; opacity: 0.5; margin-top: 10px;">* แอดมิน: admin@farm.com / รหัส: 1234</p>
+        </div>
+    </div>
+
+    <!-- HOME PAGE -->
+    <div id="home" class="page active">
+        <div class="header">
+            <div class="header-content">
+                <img src="suanlungna_icon_180.png" alt="Logo" class="header-logo">
+                <div class="header-text">
+                    <p id="greetingText">สวัสดี</p>
+                    <h2 id="farmName">สวนลุงนะ Smart Farm</h2>
+                </div>
+            </div>
+        </div>
+
+        <div class="container">
+            <!-- STATUS OVERVIEW -->
+            <div class="card">
+                <div class="section-title"><i class="fas fa-tachometer-alt"></i> สถานะระบบ</div>
+                <div class="status-grid">
+                    <div class="status-box">
+                        <div class="label">โหนด</div>
+                        <div class="value" id="nodeStatus">OFFLINE</div>
+                    </div>
+                    <div class="status-box">
+                        <div class="label">ปั๊มน้ำ</div>
+                        <div class="value" id="pumpStatus">OFF</div>
+                    </div>
+                    <div class="status-box">
+                        <div class="label">โหมด</div>
+                        <div class="value" id="modeStatus">AUTO</div>
+                    </div>
+                    <div class="status-box">
+                        <div class="label">เวลา</div>
+                        <div class="value" id="rtcTime">--:--</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- WEATHER & SENSORS -->
+            <div class="card">
+                <div class="section-title"><i class="fas fa-cloud-sun"></i> สภาพแวดล้อม</div>
+                <div class="status-grid">
+                    <div class="status-box">
+                        <div class="label">🌡️ อุณหภูมิ</div>
+                        <div class="value" id="temp">--°C</div>
+                    </div>
+                    <div class="status-box">
+                        <div class="label">💦 ความชื้น</div>
+                        <div class="value" id="hum">--%</div>
+                    </div>
+                    <div class="status-box">
+                        <div class="label">🌾 ความชื้นดิน</div>
+                        <div class="value" id="soil">--%</div>
+                    </div>
+                    <div class="status-box">
+                        <div class="label">☀️ แสง</div>
+                        <div class="value" id="light">--</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PUMP CONTROL -->
+            <div class="card">
+                <div class="section-title"><i class="fas fa-water"></i> ควบคุมปั๊มน้ำ</div>
+                <button class="btn btn-primary" onclick="togglePump()"><i class="fas fa-toggle-on"></i> เปิด/ปิดปั๊มน้ำ</button>
+                <div style="display: flex; gap: 12px;">
+                    <button class="btn btn-outline" onclick="setPumpMode('AUTO')" style="flex: 1;"><i class="fas fa-robot"></i> โหมด Auto</button>
+                    <button class="btn btn-outline" onclick="setPumpMode('MANUAL')" style="flex: 1;"><i class="fas fa-hand-paper"></i> โหมด Manual</button>
+                </div>
+            </div>
+
+            <!-- SCHEDULE -->
+            <div class="card">
+                <div class="section-title"><i class="fas fa-calendar-alt"></i> ตารางเวลา</div>
+                <div id="scheduleList"></div>
+                <button class="btn btn-primary" onclick="showScheduleEditor()"><i class="fas fa-plus"></i> เพิ่มตารางเวลา</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CHARTS PAGE -->
+    <div id="charts" class="page">
+        <div style="padding: 60px 20px 20px;">
+            <h1 style="font-size: 28px; font-weight: 700;">กราฟข้อมูล</h1>
+        </div>
+        <div class="container">
+            <!-- TEMPERATURE CHART -->
+            <div class="card">
+                <div class="section-title"><i class="fas fa-chart-line"></i> กราฟอุณหภูมิ</div>
+                <div class="chart-container">
+                    <canvas id="tempChart"></canvas>
+                </div>
+            </div>
+
+            <!-- HUMIDITY CHART -->
+            <div class="card">
+                <div class="section-title"><i class="fas fa-chart-bar"></i> กราฟความชื้น</div>
+                <div class="chart-container">
+                    <canvas id="humChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ADMIN PAGE -->
+    <div id="admin" class="page">
+        <div style="padding: 60px 20px 20px;">
+            <h1 style="font-size: 28px; font-weight: 700;">แอดมิน</h1>
+        </div>
+        <div class="container">
+            <div class="card">
+                <div class="section-title"><i class="fas fa-user-plus"></i> เพิ่มผู้ใช้ใหม่</div>
+                <input type="email" id="newEmail" class="input-control" placeholder="อีเมลผู้ใช้ใหม่">
+                <input type="password" id="newPass" class="input-control" placeholder="รหัสผ่าน">
+                <select id="newRole" class="input-control">
+                    <option value="user">ผู้ใช้งานทั่วไป (User)</option>
+                    <option value="admin">ผู้ดูแลระบบ (Admin)</option>
+                </select>
+                <button class="btn btn-primary" onclick="addUser()">เพิ่มสมาชิก</button>
+            </div>
+
+            <div class="card">
+                <div class="section-title"><i class="fas fa-users"></i> รายชื่อสมาชิก</div>
+                <ul class="user-list" id="userListContainer"></ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- SETTINGS PAGE -->
+    <div id="settings" class="page">
+        <div style="padding: 60px 20px 20px;">
+            <h1 style="font-size: 28px; font-weight: 700;">ตั้งค่า</h1>
+        </div>
+        <div class="container">
+            <div class="card">
+                <div class="section-title"><i class="fas fa-cog"></i> ทั่วไป</div>
+                <div onclick="toggleDarkMode()" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 0; cursor: pointer;">
+                    <span>โหมดมืด (Dark Mode)</span>
+                    <i class="fas fa-moon"></i>
+                </div>
+                <hr style="opacity: 0.1; margin: 12px 0;">
+                <div onclick="logout()" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 0; color: #ef4444; cursor: pointer;">
+                    <span>ออกจากระบบ</span>
+                    <i class="fas fa-sign-out-alt"></i>
+                </div>
+            </div>
+
+            <!-- ACTIVITY LOG -->
+            <div class="card">
+                <div class="section-title"><i class="fas fa-history"></i> บันทึกการทำงาน</div>
+                <div class="log-container" id="logContainer">
+                    <div class="log-item">
+                        <span class="log-time">--:--:--</span> - <span class="log-message">ระบบพร้อมใช้งาน</span>
+                    </div>
+                </div>
+                <button class="btn btn-outline" onclick="clearLogs()" style="margin-top: 12px;"><i class="fas fa-trash"></i> ล้างบันทึก</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- BOTTOM NAV -->
+    <div class="bottom-nav">
+        <div class="nav-item active" onclick="showPage('home')">
+            <i class="nav-icon fas fa-home"></i>
+            <span class="nav-label">หน้าแรก</span>
+        </div>
+        <div class="nav-item" onclick="showPage('charts')">
+            <i class="nav-icon fas fa-chart-line"></i>
+            <span class="nav-label">กราฟ</span>
+        </div>
+        <div class="nav-item" onclick="showPage('admin')">
+            <i class="nav-icon fas fa-user-shield"></i>
+            <span class="nav-label">แอดมิน</span>
+        </div>
+        <div class="nav-item" onclick="showPage('settings')">
+            <i class="nav-icon fas fa-cog"></i>
+            <span class="nav-label">ตั้งค่า</span>
+        </div>
+    </div>
+
+    <script>
+        // ==================== GLOBAL STATE ====================
+        let currentUser = null;
+        let users = JSON.parse(localStorage.getItem('smartfarm_users')) || [
+            { email: 'admin@farm.com', password: '1234', role: 'admin' }
+        ];
+        let mqttClient = null;
+        let tempData = [];
+        let humData = [];
+        let tempChart = null;
+        let humChart = null;
+        let activityLog = JSON.parse(localStorage.getItem('smartfarm_logs')) || [];
+
+        // ==================== LOGGING ====================
+        function addLog(message) {
+            const now = new Date();
+            const time = now.toLocaleTimeString('th-TH');
+            activityLog.push({ time, message });
+            if (activityLog.length > 50) activityLog.shift();
+            localStorage.setItem('smartfarm_logs', JSON.stringify(activityLog));
+            renderLogs();
+        }
+
+        function renderLogs() {
+            const container = document.getElementById('logContainer');
+            container.innerHTML = activityLog.map(log => `
+                <div class="log-item">
+                    <span class="log-time">${log.time}</span> - <span class="log-message">${log.message}</span>
+                </div>
+            `).join('');
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function clearLogs() {
+            if (confirm('ยืนยันการล้างบันทึก?')) {
+                activityLog = [];
+                localStorage.removeItem('smartfarm_logs');
+                renderLogs();
+                showToast('ล้างบันทึกสำเร็จ');
+            }
+        }
+
+        // ==================== GREETING ====================
+        function updateGreeting() {
+            const hour = new Date().getHours();
+            let greeting = '';
+            let emoji = '';
+            
+            if (hour >= 5 && hour < 12) {
+                greeting = 'สวัสดีตอนเช้า';
+                emoji = '🌅';
+            } else if (hour >= 12 && hour < 17) {
+                greeting = 'สวัสดีตอนบ่าย';
+                emoji = '☀️';
+            } else if (hour >= 17 && hour < 21) {
+                greeting = 'สวัสดีตอนเย็น';
+                emoji = '🌆';
+            } else {
+                greeting = 'สวัสดีตอนกลางคืน';
+                emoji = '🌙';
+            }
+            
+            document.getElementById('greetingText').textContent = `${greeting} ${emoji}`;
+        }
+
+        // ==================== AUTHENTICATION ====================
+        function handleLogin() {
+            const email = document.getElementById('loginEmail').value;
+            const pass = document.getElementById('loginPass').value;
+            const user = users.find(u => u.email === email && u.password === pass);
+            
+            if (user) {
+                currentUser = user;
+                localStorage.setItem('smartfarm_currentUser', JSON.stringify(user));
+                document.getElementById('loginPage').style.display = 'none';
+                addLog(`ผู้ใช้ ${email} เข้าสู่ระบบ`);
+                initMQTT();
+                showPage('home');
+                updateGreeting();
+                showToast('เข้าสู่ระบบสำเร็จ');
+            } else {
+                addLog(`พยายามเข้าสู่ระบบด้วย ${email} ล้มเหลว`);
+                showToast('อีเมลหรือรหัสผ่านไม่ถูกต้อง');
+            }
+        }
+
+        function logout() {
+            addLog(`ผู้ใช้ ${currentUser.email} ออกจากระบบ`);
+            currentUser = null;
+            localStorage.removeItem('smartfarm_currentUser');
+            if (mqttClient) mqttClient.end();
+            document.getElementById('loginPage').style.display = 'flex';
+            document.getElementById('loginEmail').value = '';
+            document.getElementById('loginPass').value = '';
+        }
+
+        // ==================== UI NAVIGATION ====================
+        function showPage(pageName) {
+            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+            document.getElementById(pageName).classList.add('active');
+            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            event.target.closest('.nav-item').classList.add('active');
+        }
+
+        function toggleDarkMode() {
+            document.body.classList.toggle('dark-mode');
+            localStorage.setItem('smartfarm_darkMode', document.body.classList.contains('dark-mode'));
+            addLog(document.body.classList.contains('dark-mode') ? 'เปิดโหมดมืด' : 'ปิดโหมดมืด');
+        }
+
+        // ==================== MQTT CONNECTION ====================
+        function initMQTT() {
+            const brokerUrl = 'wss://broker.hivemq.com:8884/mqtt';
+            mqttClient = mqtt.connect(brokerUrl, {
+                clientId: 'smartfarm_' + Math.random().toString(16).substr(2, 9),
+                username: 'smartfarm',
+                password: 'Kla12345',
+                reconnectPeriod: 5000,
+                clean: true
+            });
+
+            mqttClient.on('connect', () => {
+                console.log('MQTT Connected');
+                document.getElementById('nodeStatus').textContent = 'ONLINE';
+                document.getElementById('nodeStatus').style.color = '#10b981';
+                addLog('เชื่อมต่อ MQTT สำเร็จ');
+                
+                mqttClient.subscribe(['farm/pump/status', 'farm/time', 'farm/soil', 'farm/light', 'farm/status', 'farm/mode', 'farm/temp', 'farm/hum']);
+            });
+
+            mqttClient.on('message', (topic, message) => {
+                const msg = message.toString();
+                console.log(`${topic}: ${msg}`);
+                
+                switch(topic) {
+                    case 'farm/pump/status':
+                        document.getElementById('pumpStatus').textContent = msg === 'ON' ? 'ON' : 'OFF';
+                        document.getElementById('pumpStatus').style.color = msg === 'ON' ? '#ef4444' : '#10b981';
+                        addLog(`ปั๊มน้ำ: ${msg}`);
+                        break;
+                    case 'farm/time':
+                        document.getElementById('rtcTime').textContent = msg;
+                        break;
+                    case 'farm/soil':
+                        document.getElementById('soil').textContent = msg + '%';
+                        break;
+                    case 'farm/light':
+                        document.getElementById('light').textContent = msg;
+                        break;
+                    case 'farm/mode':
+                        document.getElementById('modeStatus').textContent = msg;
+                        addLog(`โหมด: ${msg}`);
+                        break;
+                    case 'farm/temp':
+                        document.getElementById('temp').textContent = msg + '°C';
+                        tempData.push(msg);
+                        if (tempData.length > 10) tempData.shift();
+                        updateCharts();
+                        break;
+                    case 'farm/hum':
+                        document.getElementById('hum').textContent = msg + '%';
+                        humData.push(msg);
+                        if (humData.length > 10) humData.shift();
+                        updateCharts();
+                        break;
+                }
+            });
+
+            mqttClient.on('error', (err) => {
+                console.error('MQTT Error:', err);
+                document.getElementById('nodeStatus').textContent = 'OFFLINE';
+                document.getElementById('nodeStatus').style.color = '#ef4444';
+                addLog('ข้อผิดพลาด MQTT: ' + err.message);
+            });
+        }
+
+        // ==================== PUMP CONTROL ====================
+        function togglePump() {
+            if (mqttClient && mqttClient.connected) {
+                const currentStatus = document.getElementById('pumpStatus').textContent;
+                const newStatus = currentStatus === 'ON' ? 'OFF' : 'ON';
+                mqttClient.publish('farm/pump', newStatus);
+                addLog(`สั่งปั๊มน้ำ: ${newStatus}`);
+                showToast(`ปั๊มน้ำ: ${newStatus}`);
+            } else {
+                showToast('ไม่ได้เชื่อมต่อ MQTT');
+            }
+        }
+
+        function setPumpMode(mode) {
+            if (mqttClient && mqttClient.connected) {
+                mqttClient.publish('farm/mode', mode);
+                addLog(`เปลี่ยนโหมด: ${mode}`);
+                showToast(`โหมด: ${mode}`);
+            } else {
+                showToast('ไม่ได้เชื่อมต่อ MQTT');
+            }
+        }
+
+        // ==================== CHARTS ====================
+        function updateCharts() {
+            if (!tempChart) initCharts();
+            
+            tempChart.data.labels = tempData.map((_, i) => i + 1);
+            tempChart.data.datasets[0].data = tempData;
+            tempChart.update();
+
+            humChart.data.labels = humData.map((_, i) => i + 1);
+            humChart.data.datasets[0].data = humData;
+            humChart.update();
+        }
+
+        function initCharts() {
+            const tempCtx = document.getElementById('tempChart').getContext('2d');
+            tempChart = new Chart(tempCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'อุณหภูมิ (°C)',
+                        data: [],
+                        borderColor: '#10b981',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        tension: 0.4,
+                        fill: true
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: true } } }
+            });
+
+            const humCtx = document.getElementById('humChart').getContext('2d');
+            humChart = new Chart(humCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'ความชื้น (%)',
+                        data: [],
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        tension: 0.4,
+                        fill: true
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: true } } }
+            });
+        }
+
+        // ==================== SCHEDULE ====================
+        function showScheduleEditor() {
+            const time = prompt('ใส่เวลา (HH:MM):');
+            if (time && mqttClient && mqttClient.connected) {
+                mqttClient.publish('farm/schedule', time);
+                addLog(`ตั้งตารางเวลา: ${time}`);
+                showToast('บันทึกตารางเวลา: ' + time);
+            }
+        }
+
+        // ==================== ADMIN ====================
+        function addUser() {
+            const email = document.getElementById('newEmail').value;
+            const pass = document.getElementById('newPass').value;
+            const role = document.getElementById('newRole').value;
+            
+            if (email && pass) {
+                users.push({ email, password: pass, role });
+                localStorage.setItem('smartfarm_users', JSON.stringify(users));
+                document.getElementById('newEmail').value = '';
+                document.getElementById('newPass').value = '';
+                renderUserList();
+                addLog(`เพิ่มผู้ใช้: ${email} (${role})`);
+                showToast('เพิ่มผู้ใช้สำเร็จ');
+            }
+        }
+
+        function deleteUser(email) {
+            if (confirm('ยืนยันการลบผู้ใช้?')) {
+                users = users.filter(u => u.email !== email);
+                localStorage.setItem('smartfarm_users', JSON.stringify(users));
+                renderUserList();
+                addLog(`ลบผู้ใช้: ${email}`);
+                showToast('ลบผู้ใช้สำเร็จ');
+            }
+        }
+
+        function renderUserList() {
+            const container = document.getElementById('userListContainer');
+            container.innerHTML = users.map(u => `
+                <li class="user-item">
+                    <div>
+                        <strong>${u.email}</strong>
+                        <span class="user-badge">${u.role}</span>
+                    </div>
+                    <button class="btn btn-danger" onclick="deleteUser('${u.email}')" style="width: auto; padding: 8px 12px; margin: 0;"><i class="fas fa-trash"></i></button>
+                </li>
+            `).join('');
+        }
+
+        // ==================== UTILITIES ====================
+        function showToast(msg) {
+            const toast = document.createElement('div');
+            toast.className = 'toast';
+            toast.textContent = msg;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+        // ==================== INIT ====================
+        window.addEventListener('load', () => {
+            const savedUser = localStorage.getItem('smartfarm_currentUser');
+            if (savedUser) {
+                currentUser = JSON.parse(savedUser);
+                document.getElementById('loginPage').style.display = 'none';
+                initMQTT();
+                updateGreeting();
+            }
+            
+            if (localStorage.getItem('smartfarm_darkMode') === 'true') {
+                document.body.classList.add('dark-mode');
+            }
+            
+            renderUserList();
+            renderLogs();
+            addLog('ระบบเริ่มต้นสำเร็จ');
+        });
+
+        // Update greeting every minute
+        setInterval(updateGreeting, 60000);
+    </script>
+</body>
+</html>
