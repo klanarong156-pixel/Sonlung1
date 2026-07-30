@@ -1,4 +1,6 @@
 #include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266HTTPUpdateServer.h>
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
@@ -26,6 +28,15 @@ const char* topic_schedule = "farm/schedule";
 const char* topic_temperature = "farm/temp";
 const char* topic_humidity = "farm/hum";
 const char* topic_sensor_data = "farm/data";
+const char* topic_wifi_status = "farm/status/wifi";
+const char* topic_mqtt_status = "farm/status/mqtt";
+const char* topic_relay_status_json = "farm/status/relay";
+const char* topic_pump_status = "farm/status/pump";
+const char* topic_system_status = "farm/status/system";
+const char* topic_pump_timeout_config = "farm/config/pump_timeout";
+const char* topic_pump_timeout_state = "farm/config/pump_timeout/state";
+const char* topic_zone_config_prefix = "farm/config/zone/";
+const char* topic_zone_config_suffix = "/name";
 
 // ==========================================
 // การตั้งค่า Hardware
@@ -49,7 +60,12 @@ struct ScheduleData {
   char offTime2[6]; // "HH:MM"
 };
 
+struct ZoneConfig {
+  char name[20];
+};
+
 ScheduleData schedules;
+ZoneConfig zoneConfigs[RELAY_COUNT];
 byte lastScheduleAction = 0; // 0=None, 1=S1ON, 2=S1OFF, 3=S2ON, 4=S2OFF
 
 // ==========================================
@@ -61,17 +77,21 @@ float temperature = NAN;
 float humidity = NAN;
 bool rtcAvailable = false;
 unsigned long lastWiFiReconnect = 0;
+unsigned long pumpStartTime = 0;
+unsigned long pumpTimeout = 600;
 
 // ตัวแปรสำหรับจัดการเวลา (ไม่ต้องใช้ delay)
 unsigned long lastHeartbeat = 0;
 unsigned long lastRTCUpdate = 0;
 unsigned long lastDHTRead = 0;
 unsigned long lastMQTTReconnect = 0;
+unsigned long lastStatusUpdate = 0;
 const unsigned long HEARTBEAT_INTERVAL = 30000; // 30 วินาที
 const unsigned long RTC_INTERVAL = 1000;        // 1 วินาที
 const unsigned long DHT_INTERVAL = 2000;        // 2 วินาที
 const unsigned long MQTT_RECONNECT_INTERVAL = 5000; // 5 วินาที
 const unsigned long WIFI_RECONNECT_INTERVAL = 10000; // 10 วินาที
+const unsigned long STATUS_INTERVAL = 30000; // 30 วินาที
 const byte DHT_MAX_RETRIES = 3;
 const size_t MQTT_PAYLOAD_BUFFER_SIZE = 80; // รองรับ payload อย่างน้อย 64 bytes + null terminator
 const float DHT_MIN_TEMPERATURE = -10.0;
@@ -86,11 +106,16 @@ RTC_DS3231 rtc;
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
 DHT dht(DHT_PIN, DHTTYPE);
+ESP8266WebServer httpServer(80);
+ESP8266HTTPUpdateServer httpUpdater;
 
 const int RELAY_STATE_EEPROM_ADDR = sizeof(ScheduleData);
-const int EEPROM_SIZE = sizeof(ScheduleData) + RELAY_COUNT;
+const int ZONE_CONFIG_EEPROM_ADDR = RELAY_STATE_EEPROM_ADDR + RELAY_COUNT;
+const int PUMP_TIMEOUT_EEPROM_ADDR = ZONE_CONFIG_EEPROM_ADDR + (sizeof(ZoneConfig) * RELAY_COUNT);
+const int EEPROM_SIZE = PUMP_TIMEOUT_EEPROM_ADDR + sizeof(unsigned long);
 
 void publishSensorData();
+void publishMonitoringStatus();
 void restartAfterWiFiManagerFailure();
 
 bool schedulesAreEqual(const ScheduleData& left, const ScheduleData& right) {
@@ -190,6 +215,94 @@ void saveRelayStateToEEPROM(byte relayIndex) {
   EEPROM.end();
 }
 
+bool isValidZoneName(const char* name) {
+  if (name[0] == '\0') return false;
+  for (byte i = 0; i < sizeof(zoneConfigs[0].name) && name[i] != '\0'; i++) {
+    byte value = (byte)name[i];
+    if (value < 32 || value == 127) return false;
+  }
+  return true;
+}
+
+void setDefaultZoneConfigs() {
+  for (byte i = 0; i < RELAY_COUNT; i++) {
+    snprintf(zoneConfigs[i].name, sizeof(zoneConfigs[i].name), "Zone %d", i + 1);
+  }
+}
+
+void loadZoneConfigsFromEEPROM() {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(ZONE_CONFIG_EEPROM_ADDR, zoneConfigs);
+  EEPROM.end();
+
+  bool valid = true;
+  for (byte i = 0; i < RELAY_COUNT; i++) {
+    zoneConfigs[i].name[sizeof(zoneConfigs[i].name) - 1] = '\0';
+    if (!isValidZoneName(zoneConfigs[i].name)) {
+      valid = false;
+      break;
+    }
+  }
+
+  if (!valid) {
+    setDefaultZoneConfigs();
+    EEPROM.begin(EEPROM_SIZE);
+    EEPROM.put(ZONE_CONFIG_EEPROM_ADDR, zoneConfigs);
+    EEPROM.commit();
+    EEPROM.end();
+    Serial.println("Initialized default zone names in EEPROM");
+  } else {
+    Serial.println("Loaded zone names from EEPROM");
+  }
+}
+
+void saveZoneConfigToEEPROM(byte zoneIndex) {
+  if (zoneIndex >= RELAY_COUNT) return;
+
+  ZoneConfig savedConfig;
+  int address = ZONE_CONFIG_EEPROM_ADDR + (sizeof(ZoneConfig) * zoneIndex);
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(address, savedConfig);
+  savedConfig.name[sizeof(savedConfig.name) - 1] = '\0';
+
+  if (strncmp(savedConfig.name, zoneConfigs[zoneIndex].name, sizeof(savedConfig.name)) == 0) {
+    EEPROM.end();
+    return;
+  }
+
+  EEPROM.put(address, zoneConfigs[zoneIndex]);
+  EEPROM.commit();
+  EEPROM.end();
+}
+
+void loadPumpTimeoutFromEEPROM() {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(PUMP_TIMEOUT_EEPROM_ADDR, pumpTimeout);
+  EEPROM.end();
+
+  if (pumpTimeout == 0 || pumpTimeout > 86400UL) {
+    pumpTimeout = 600;
+    EEPROM.begin(EEPROM_SIZE);
+    EEPROM.put(PUMP_TIMEOUT_EEPROM_ADDR, pumpTimeout);
+    EEPROM.commit();
+    EEPROM.end();
+    Serial.println("Initialized default pump timeout in EEPROM");
+  }
+}
+
+void savePumpTimeoutToEEPROM() {
+  unsigned long savedTimeout = 0;
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(PUMP_TIMEOUT_EEPROM_ADDR, savedTimeout);
+  if (savedTimeout == pumpTimeout) {
+    EEPROM.end();
+    return;
+  }
+  EEPROM.put(PUMP_TIMEOUT_EEPROM_ADDR, pumpTimeout);
+  EEPROM.commit();
+  EEPROM.end();
+}
+
 void writeRelayPin(byte relayIndex) {
   if (relayIndex >= RELAY_COUNT) return;
 
@@ -226,6 +339,9 @@ void setRelay(byte relayIndex, bool state) {
   if (relayStates[relayIndex] == state) return;
 
   relayStates[relayIndex] = state;
+  if (relayIndex == 0) {
+    pumpStartTime = state ? millis() : 0;
+  }
   writeRelayPin(relayIndex);
   saveRelayStateToEEPROM(relayIndex);
 
@@ -240,6 +356,7 @@ void setRelay(byte relayIndex, bool state) {
   // ส่งสถานะไปยัง MQTT
   publishRelayStatus(relayIndex);
   publishSensorData();
+  publishMonitoringStatus();
 }
 
 void setPump(bool state) {
@@ -286,6 +403,92 @@ void publishSensorData() {
            relayStates[2] ? "ON" : "OFF",
            relayStates[3] ? "ON" : "OFF");
   client.publish(topic_sensor_data, jsonBuffer, true);
+}
+
+void publishWifiStatus() {
+  if (!client.connected()) return;
+
+  char jsonBuffer[96];
+  IPAddress ip = WiFi.localIP();
+  snprintf(jsonBuffer, sizeof(jsonBuffer), "{\"status\":\"%s\",\"rssi\":%ld,\"ip\":\"%u.%u.%u.%u\"}",
+           WiFi.status() == WL_CONNECTED ? "ONLINE" : "OFFLINE",
+           WiFi.RSSI(), ip[0], ip[1], ip[2], ip[3]);
+  client.publish(topic_wifi_status, jsonBuffer, true);
+}
+
+void publishMqttStatus() {
+  if (!client.connected()) return;
+
+  char jsonBuffer[64];
+  snprintf(jsonBuffer, sizeof(jsonBuffer), "{\"connected\":true,\"uptime\":%lu}", millis() / 1000UL);
+  client.publish(topic_mqtt_status, jsonBuffer, true);
+}
+
+unsigned long getPumpRemainingSeconds() {
+  if (!relayStates[0] || pumpTimeout == 0 || pumpStartTime == 0) return 0;
+
+  unsigned long elapsedSeconds = (millis() - pumpStartTime) / 1000UL;
+  return elapsedSeconds >= pumpTimeout ? 0 : pumpTimeout - elapsedSeconds;
+}
+
+void publishPumpStatus() {
+  if (!client.connected()) return;
+
+  char jsonBuffer[72];
+  snprintf(jsonBuffer, sizeof(jsonBuffer), "{\"state\":\"%s\",\"remaining\":%lu,\"timeout\":%lu}",
+           relayStates[0] ? "ON" : "OFF", getPumpRemainingSeconds(), pumpTimeout);
+  client.publish(topic_pump_status, jsonBuffer, true);
+}
+
+void publishRelayJsonStatus() {
+  if (!client.connected()) return;
+
+  char jsonBuffer[96];
+  snprintf(jsonBuffer, sizeof(jsonBuffer), "{\"pump\":%d,\"zone1\":%d,\"zone2\":%d,\"zone3\":%d,\"zone4\":%d}",
+           relayStates[0], relayStates[0], relayStates[1], relayStates[2], relayStates[3]);
+  client.publish(topic_relay_status_json, jsonBuffer, true);
+}
+
+void publishSystemStatus() {
+  if (!client.connected()) return;
+
+  char jsonBuffer[96];
+  snprintf(jsonBuffer, sizeof(jsonBuffer), "{\"freeHeap\":%lu,\"uptime\":%lu,\"wifi\":%s,\"mqtt\":true}",
+           ESP.getFreeHeap(), millis() / 1000UL, WiFi.status() == WL_CONNECTED ? "true" : "false");
+  client.publish(topic_system_status, jsonBuffer, true);
+}
+
+void publishZoneName(byte zoneIndex) {
+  if (!client.connected() || zoneIndex >= RELAY_COUNT) return;
+
+  char topicBuffer[40];
+  snprintf(topicBuffer, sizeof(topicBuffer), "farm/config/zone/%d/name/state", zoneIndex + 1);
+  client.publish(topicBuffer, zoneConfigs[zoneIndex].name, true);
+}
+
+void publishAllZoneNames() {
+  for (byte i = 0; i < RELAY_COUNT; i++) {
+    publishZoneName(i);
+    yield();
+  }
+}
+
+void publishPumpTimeoutStatus() {
+  if (!client.connected()) return;
+
+  char timeoutBuffer[12];
+  snprintf(timeoutBuffer, sizeof(timeoutBuffer), "%lu", pumpTimeout);
+  client.publish(topic_pump_timeout_state, timeoutBuffer, true);
+}
+
+void publishMonitoringStatus() {
+  publishWifiStatus();
+  publishMqttStatus();
+  publishPumpStatus();
+  publishRelayJsonStatus();
+  publishSystemStatus();
+  publishAllZoneNames();
+  publishPumpTimeoutStatus();
 }
 
 void readDHTSensor() {
@@ -366,6 +569,32 @@ bool copyPayload(char* destination, size_t destinationSize, const byte* payload,
   return true;
 }
 
+bool parseZoneNameTopic(const char* topic, byte& zoneIndex) {
+  size_t prefixLength = strlen(topic_zone_config_prefix);
+  size_t suffixLength = strlen(topic_zone_config_suffix);
+  size_t topicLength = strlen(topic);
+
+  if (topicLength <= prefixLength + suffixLength) return false;
+  if (strncmp(topic, topic_zone_config_prefix, prefixLength) != 0) return false;
+  if (strcmp(topic + topicLength - suffixLength, topic_zone_config_suffix) != 0) return false;
+
+  char zoneNumberBuffer[4];
+  size_t zoneNumberLength = topicLength - prefixLength - suffixLength;
+  if (zoneNumberLength == 0 || zoneNumberLength >= sizeof(zoneNumberBuffer)) return false;
+
+  memcpy(zoneNumberBuffer, topic + prefixLength, zoneNumberLength);
+  zoneNumberBuffer[zoneNumberLength] = '\0';
+  for (size_t i = 0; i < zoneNumberLength; i++) {
+    if (!isDigit(zoneNumberBuffer[i])) return false;
+  }
+
+  int zoneNumber = atoi(zoneNumberBuffer);
+  if (zoneNumber < 1 || zoneNumber > RELAY_COUNT) return false;
+
+  zoneIndex = zoneNumber - 1;
+  return true;
+}
+
 bool parseRelayTopic(const char* topic, byte& relayIndex) {
   size_t prefixLength = strlen(topic_relay_set_prefix);
   size_t suffixLength = strlen(topic_relay_set_suffix);
@@ -401,7 +630,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Topic: "); Serial.println(topic);
   Serial.print("Payload length: "); Serial.println(length);
 
-  // 1. ควบคุมปั๊มน้ำช่อง 1 แบบ Manual (topic เดิม)
   if (strcmp(topic, topic_pump) == 0) {
     if (!isAutoMode) {
       if (payloadEquals(payload, length, "ON")) setPump(true);
@@ -410,10 +638,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     } else {
       Serial.println("Ignored: System is in AUTO mode");
     }
-  }
-  // 1.1 ควบคุมรีเลย์ 4 ช่องแบบ Manual (farm/relay/1/set ... farm/relay/4/set)
-  else {
+  } else {
     byte relayIndex = 0;
+    byte zoneIndex = 0;
+
     if (parseRelayTopic(topic, relayIndex)) {
       if (!isAutoMode) {
         if (payloadEquals(payload, length, "ON")) setRelay(relayIndex, true);
@@ -422,9 +650,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       } else {
         Serial.println("Ignored: System is in AUTO mode");
       }
-    }
-    // 2. เปลี่ยนโหมด Auto/Manual
-    else if (strcmp(topic, topic_mode) == 0) {
+    } else if (strcmp(topic, topic_mode) == 0) {
       bool modeChanged = false;
       if (payloadEquals(payload, length, "AUTO")) {
         modeChanged = !isAutoMode;
@@ -439,9 +665,26 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       }
 
       if (modeChanged) publishMode();
-    }
-    // 3. ตั้งค่า Schedule (รูปแบบ: HH:MM,HH:MM,HH:MM,HH:MM)
-    else if (strcmp(topic, topic_schedule) == 0) {
+    } else if (strcmp(topic, topic_pump_timeout_config) == 0) {
+      unsigned long newTimeout = hasTextPayload ? strtoul(msg, nullptr, 10) : 0;
+      if (newTimeout > 0 && newTimeout <= 86400UL) {
+        pumpTimeout = newTimeout;
+        savePumpTimeoutToEEPROM();
+        publishPumpTimeoutStatus();
+        Serial.println("Pump timeout updated via MQTT");
+      } else {
+        Serial.println("Ignored: Invalid pump timeout");
+      }
+    } else if (hasTextPayload && parseZoneNameTopic(topic, zoneIndex)) {
+      if (isValidZoneName(msg)) {
+        strlcpy(zoneConfigs[zoneIndex].name, msg, sizeof(zoneConfigs[zoneIndex].name));
+        saveZoneConfigToEEPROM(zoneIndex);
+        publishZoneName(zoneIndex);
+        Serial.println("Zone name updated via MQTT");
+      } else {
+        Serial.println("Ignored: Invalid zone name");
+      }
+    } else if (strcmp(topic, topic_schedule) == 0) {
       ScheduleData parsedSchedule;
       if (hasTextPayload && parseScheduleMessage(msg, parsedSchedule)) {
         if (!schedulesAreEqual(schedules, parsedSchedule)) {
@@ -486,12 +729,20 @@ void connectMQTT() {
       }
       subscribed = client.subscribe(topic_mode) && subscribed;
       subscribed = client.subscribe(topic_schedule) && subscribed;
+      subscribed = client.subscribe(topic_pump_timeout_config) && subscribed;
+      for (byte i = 0; i < RELAY_COUNT; i++) {
+        char zoneTopic[40];
+        snprintf(zoneTopic, sizeof(zoneTopic), "farm/config/zone/%d/name", i + 1);
+        subscribed = client.subscribe(zoneTopic) && subscribed;
+        yield();
+      }
       Serial.println(subscribed ? "MQTT subscriptions OK" : "WARNING: MQTT subscription failed");
 
       // ส่งสถานะเริ่มต้น
       publishAllRelayStatus();
       publishMode();
       publishSensorData();
+      publishMonitoringStatus();
     } else {
       Serial.print("Failed, rc=");
       Serial.println(client.state());
@@ -546,6 +797,16 @@ void checkSchedule() {
   }
 }
 
+void checkPumpSafety() {
+  if (!relayStates[0] || pumpTimeout == 0 || pumpStartTime == 0) return;
+
+  unsigned long elapsedSeconds = (millis() - pumpStartTime) / 1000UL;
+  if (elapsedSeconds >= pumpTimeout) {
+    Serial.println("Pump safety timeout reached, turning pump OFF");
+    setPump(false);
+  }
+}
+
 void restartAfterWiFiManagerFailure() {
   unsigned long startMillis = millis();
   while (millis() - startMillis < 3000) {
@@ -571,6 +832,8 @@ void setup() {
   // โหลด Schedule และสถานะรีเลย์จาก EEPROM
   loadScheduleFromEEPROM();
   loadRelayStatesFromEEPROM();
+  loadZoneConfigsFromEEPROM();
+  loadPumpTimeoutFromEEPROM();
   for (byte i = 0; i < RELAY_COUNT; i++) {
     writeRelayPin(i);
   }
@@ -615,6 +878,10 @@ void setup() {
   client.setKeepAlive(30);
   client.setSocketTimeout(5);
 
+  httpUpdater.setup(&httpServer, "/update", "admin", "1234");
+  httpServer.begin();
+  Serial.println("HTTP OTA Update ready at /update");
+
   // เปิดใช้งาน Watchdog Timer
   ESP.wdtEnable(WDTO_8S); // รีเซ็ตบอร์ดถ้าค้างเกิน 8 วินาที
 
@@ -640,6 +907,9 @@ void loop() {
     return; // ข้ามการทำงานส่วนอื่นไปก่อน
   }
 
+  httpServer.handleClient();
+  yield();
+
   // จัดการ MQTT
   if (!client.connected()) {
     connectMQTT();
@@ -655,6 +925,7 @@ void loop() {
     lastRTCUpdate = currentMillis;
     if (client.connected()) publishTime();
     checkSchedule();
+    checkPumpSafety();
   }
 
   // 2. อ่าน DHT11 ทุก 2 วินาทีแบบ Non-blocking
@@ -667,5 +938,10 @@ void loop() {
   if (currentMillis - lastHeartbeat >= HEARTBEAT_INTERVAL) {
     lastHeartbeat = currentMillis;
     if (client.connected()) publishHeartbeat();
+  }
+
+  if (currentMillis - lastStatusUpdate >= STATUS_INTERVAL) {
+    lastStatusUpdate = currentMillis;
+    if (client.connected()) publishMonitoringStatus();
   }
 }

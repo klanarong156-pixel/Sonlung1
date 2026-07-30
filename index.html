@@ -238,6 +238,41 @@
                 </div>
             </div>
 
+
+            <!-- MONITORING & SAFETY -->
+            <div class="card">
+                <div class="section-title"><i class="fas fa-shield-alt"></i> Monitoring & Safety</div>
+                <div class="status-grid">
+                    <div class="status-box">
+                        <div class="label">WiFi</div>
+                        <div class="value" id="wifiStatus">--</div>
+                        <div class="label" id="wifiDetail">RSSI -- / IP --</div>
+                    </div>
+                    <div class="status-box">
+                        <div class="label">MQTT</div>
+                        <div class="value" id="mqttStatus">--</div>
+                        <div class="label" id="mqttUptime">Uptime --</div>
+                    </div>
+                    <div class="status-box">
+                        <div class="label">Pump Safety</div>
+                        <div class="value" id="pumpCountdown">--:--</div>
+                        <div class="label">Remaining</div>
+                    </div>
+                    <div class="status-box">
+                        <div class="label">System</div>
+                        <div class="value" id="freeHeap">--</div>
+                        <div class="label">Free Heap</div>
+                    </div>
+                </div>
+                <input type="number" id="pumpTimeoutInput" class="input-control" min="1" max="86400" placeholder="Pump timeout seconds เช่น 600">
+                <button class="btn btn-outline" onclick="setPumpTimeout()"><i class="fas fa-hourglass-half"></i> ตั้งเวลา Safety ปั๊ม</button>
+            </div>
+
+            <div class="card">
+                <div class="section-title"><i class="fas fa-tags"></i> ตั้งชื่อ Zone</div>
+                <div class="status-grid" id="zoneNameGrid"></div>
+            </div>
+
             <!-- RELAY CONTROL -->
             <div class="card">
                 <div class="section-title"><i class="fas fa-plug"></i> ควบคุมรีเลย์ 4 ช่อง</div>
@@ -373,6 +408,9 @@
         const relayLabels = ['ปั๊มน้ำ', 'โซน 1', 'โซน 2', 'ไฟศาลา'];
         const relayDataKeys = ['pump', 'zone1', 'zone2', 'pavilionLight'];
         const relayStates = Array(relayCount).fill('OFF');
+        const zoneNames = ['Zone 1', 'Zone 2', 'Zone 3', 'Zone 4'];
+        let pumpTimeoutSeconds = 600;
+        let pumpCountdownEnd = null;
 
         // ==================== LOGGING ====================
         function addLog(message) {
@@ -507,7 +545,7 @@
                 document.getElementById('nodeStatus').style.color = '#10b981';
                 addLog('เชื่อมต่อ MQTT สำเร็จ');
 
-                mqttClient.subscribe(['farm/time', 'farm/soil', 'farm/light', 'farm/status', 'farm/mode', 'farm/temp', 'farm/hum', 'farm/data', 'farm/relay/+/status']);
+                mqttClient.subscribe(['farm/time', 'farm/soil', 'farm/light', 'farm/status', 'farm/mode', 'farm/temp', 'farm/hum', 'farm/data', 'farm/relay/+/status', 'farm/status/wifi', 'farm/status/mqtt', 'farm/status/relay', 'farm/status/pump', 'farm/status/system', 'farm/config/pump_timeout/state', 'farm/config/zone/+/name/state']);
             });
 
             mqttClient.on('message', (topic, message) => {
@@ -518,6 +556,12 @@
                     const relayNumber = Number(topic.split('/')[2]);
                     updateRelayState(relayNumber, msg === 'ON' ? 'ON' : 'OFF');
                     addLog(`${relayLabels[relayNumber - 1] || `รีเลย์ ${relayNumber}`}: ${msg}`);
+                    return;
+                }
+
+                if (topic.startsWith('farm/config/zone/') && topic.endsWith('/name/state')) {
+                    const zoneNumber = Number(topic.split('/')[3]);
+                    updateZoneName(zoneNumber, msg);
                     return;
                 }
 
@@ -551,6 +595,24 @@
                         break;
                     case 'farm/hum':
                         updateEnvironmentValue('humidity', msg);
+                        break;
+                    case 'farm/status/wifi':
+                        updateWifiStatus(msg);
+                        break;
+                    case 'farm/status/mqtt':
+                        updateMqttStatus(msg);
+                        break;
+                    case 'farm/status/relay':
+                        updateRelayJsonStatus(msg);
+                        break;
+                    case 'farm/status/pump':
+                        updatePumpStatus(msg);
+                        break;
+                    case 'farm/status/system':
+                        updateSystemStatus(msg);
+                        break;
+                    case 'farm/config/pump_timeout/state':
+                        updatePumpTimeout(msg);
                         break;
                 }
             });
@@ -602,6 +664,7 @@
             if (relayNumber < 1 || relayNumber > relayCount) return;
 
             relayStates[relayNumber - 1] = state;
+            if (relayNumber === 1) updatePumpCountdownState(state);
             const statusEl = document.getElementById(`relay${relayNumber}Status`);
             if (statusEl) {
                 statusEl.textContent = state;
@@ -691,6 +754,158 @@
                 },
                 options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: true } } }
             });
+        }
+
+
+        function formatDuration(seconds) {
+            const safeSeconds = Math.max(0, Number(seconds) || 0);
+            const minutes = Math.floor(safeSeconds / 60).toString().padStart(2, '0');
+            const remainingSeconds = Math.floor(safeSeconds % 60).toString().padStart(2, '0');
+            return `${minutes}:${remainingSeconds}`;
+        }
+
+        function updatePumpCountdownState(state) {
+            if (state === 'ON' && !pumpCountdownEnd) {
+                pumpCountdownEnd = Date.now() + pumpTimeoutSeconds * 1000;
+            } else if (state === 'OFF') {
+                pumpCountdownEnd = null;
+            }
+            refreshPumpCountdown();
+        }
+
+        function refreshPumpCountdown() {
+            const countdownEl = document.getElementById('pumpCountdown');
+            if (!countdownEl) return;
+
+            if (!pumpCountdownEnd) {
+                countdownEl.textContent = '--:--';
+                return;
+            }
+
+            const remainingSeconds = Math.ceil((pumpCountdownEnd - Date.now()) / 1000);
+            countdownEl.textContent = formatDuration(remainingSeconds);
+            if (remainingSeconds <= 0) pumpCountdownEnd = null;
+        }
+
+        function updateWifiStatus(payload) {
+            try {
+                const data = JSON.parse(payload);
+                document.getElementById('wifiStatus').textContent = data.status || '--';
+                document.getElementById('wifiDetail').textContent = `RSSI ${data.rssi ?? '--'} / IP ${data.ip || '--'}`;
+            } catch (error) {
+                console.warn('Invalid WiFi status payload:', payload);
+            }
+        }
+
+        function updateMqttStatus(payload) {
+            try {
+                const data = JSON.parse(payload);
+                document.getElementById('mqttStatus').textContent = data.connected ? 'ONLINE' : 'OFFLINE';
+                document.getElementById('mqttUptime').textContent = `Uptime ${data.uptime ?? '--'}s`;
+            } catch (error) {
+                console.warn('Invalid MQTT status payload:', payload);
+            }
+        }
+
+        function updateRelayJsonStatus(payload) {
+            try {
+                const data = JSON.parse(payload);
+                if (data.pump !== undefined) updateRelayState(1, data.pump ? 'ON' : 'OFF');
+                if (data.zone2 !== undefined) updateRelayState(2, data.zone2 ? 'ON' : 'OFF');
+                if (data.zone3 !== undefined) updateRelayState(3, data.zone3 ? 'ON' : 'OFF');
+                if (data.zone4 !== undefined) updateRelayState(4, data.zone4 ? 'ON' : 'OFF');
+            } catch (error) {
+                console.warn('Invalid relay status payload:', payload);
+            }
+        }
+
+        function updatePumpStatus(payload) {
+            try {
+                const data = JSON.parse(payload);
+                updateRelayState(1, data.state === 'ON' ? 'ON' : 'OFF');
+                pumpTimeoutSeconds = Number(data.timeout) || pumpTimeoutSeconds;
+                pumpCountdownEnd = data.state === 'ON' ? Date.now() + (Number(data.remaining) || 0) * 1000 : null;
+                document.getElementById('pumpTimeoutInput').value = pumpTimeoutSeconds;
+                refreshPumpCountdown();
+            } catch (error) {
+                console.warn('Invalid pump status payload:', payload);
+            }
+        }
+
+        function updateSystemStatus(payload) {
+            try {
+                const data = JSON.parse(payload);
+                document.getElementById('freeHeap').textContent = data.freeHeap ?? '--';
+            } catch (error) {
+                console.warn('Invalid system status payload:', payload);
+            }
+        }
+
+        function updatePumpTimeout(value) {
+            const timeout = Number(value);
+            if (!Number.isFinite(timeout) || timeout <= 0) return;
+            pumpTimeoutSeconds = timeout;
+            document.getElementById('pumpTimeoutInput').value = timeout;
+            if (relayStates[0] === 'ON') pumpCountdownEnd = Date.now() + pumpTimeoutSeconds * 1000;
+            refreshPumpCountdown();
+        }
+
+        function setPumpTimeout() {
+            const timeout = Number(document.getElementById('pumpTimeoutInput').value);
+            if (!Number.isInteger(timeout) || timeout < 1 || timeout > 86400) {
+                showToast('เวลาต้องอยู่ระหว่าง 1-86400 วินาที');
+                return;
+            }
+
+            if (mqttClient && mqttClient.connected) {
+                mqttClient.publish('farm/config/pump_timeout', String(timeout));
+                updatePumpTimeout(timeout);
+                addLog(`ตั้งเวลา Safety ปั๊ม: ${timeout} วินาที`);
+                showToast('ตั้งเวลา Safety ปั๊มสำเร็จ');
+            } else {
+                showToast('ไม่ได้เชื่อมต่อ MQTT');
+            }
+        }
+
+        function escapeAttribute(value) {
+            return String(value).replace(/[&<>"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]));
+        }
+
+        function renderZoneNameControls() {
+            const grid = document.getElementById('zoneNameGrid');
+            if (!grid) return;
+
+            grid.innerHTML = zoneNames.map((name, index) => `
+                <div class="status-box">
+                    <div class="label">Zone ${index + 1}</div>
+                    <input id="zoneName${index + 1}" class="input-control" maxlength="19" value="${escapeAttribute(name)}">
+                    <button class="btn btn-outline" onclick="setZoneName(${index + 1})" style="margin-bottom: 0;">บันทึก</button>
+                </div>
+            `).join('');
+        }
+
+        function updateZoneName(zoneNumber, name) {
+            if (zoneNumber < 1 || zoneNumber > relayCount || !name) return;
+            zoneNames[zoneNumber - 1] = name;
+            renderZoneNameControls();
+        }
+
+        function setZoneName(zoneNumber) {
+            const input = document.getElementById(`zoneName${zoneNumber}`);
+            const name = (input?.value || '').trim();
+            if (!name) {
+                showToast('กรุณาใส่ชื่อ Zone');
+                return;
+            }
+
+            if (mqttClient && mqttClient.connected) {
+                mqttClient.publish(`farm/config/zone/${zoneNumber}/name`, name);
+                updateZoneName(zoneNumber, name);
+                addLog(`เปลี่ยนชื่อ Zone ${zoneNumber}: ${name}`);
+                showToast('บันทึกชื่อ Zone สำเร็จ');
+            } else {
+                showToast('ไม่ได้เชื่อมต่อ MQTT');
+            }
         }
 
         // ==================== SCHEDULE ====================
@@ -817,6 +1032,7 @@
             }
 
             renderRelayControls();
+            renderZoneNameControls();
             renderUserList();
             renderLogs();
             addLog('ระบบเริ่มต้นสำเร็จ');
@@ -824,6 +1040,7 @@
 
         // Update greeting every minute
         setInterval(updateGreeting, 60000);
+        setInterval(refreshPumpCountdown, 1000);
     </script>
 </body>
 </html>
