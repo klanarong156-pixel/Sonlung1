@@ -745,9 +745,7 @@
 
             const normalizedSchedule = [parsedSchedule.morningOn, parsedSchedule.morningOff, parsedSchedule.eveningOn, parsedSchedule.eveningOff].join(',');
             if (mqttClient && mqttClient.connected) {
-                mqttClient.publish('farm/mode', 'AUTO');
                 mqttClient.publish('farm/schedule', normalizedSchedule);
-                updatePumpMode('AUTO');
                 renderSchedule(normalizedSchedule);
                 addLog(`ตั้งตารางเวลาอัตโนมัติ: ${normalizedSchedule}`);
                 showToast('บันทึกตารางเวลาอัตโนมัติ: ' + normalizedSchedule);
