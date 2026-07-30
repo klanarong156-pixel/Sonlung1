@@ -1,7 +1,7 @@
 {
-  "name": "สวนลุงนะ Smart Farm - Admin V4",
+  "name": "สวนลุงนะ Smart Farm - Admin V7",
   "short_name": "Smart Farm",
-  "description": "ระบบจัดการฟาร์มอัจฉริยะด้วย ESP8266 และ MQTT",
+  "description": "ระบบจัดการฟาร์มอัจฉริยะด้วย ESP8266, DHT11, รีเลย์ 4 ช่อง และ MQTT",
   "start_url": "/index.html",
   "scope": "/",
   "display": "standalone",
@@ -39,9 +39,9 @@
   ],
   "shortcuts": [
     {
-      "name": "เปิด-ปิดปั๊มน้ำ",
-      "short_name": "ควบคุมปั๊ม",
-      "description": "ควบคุมปั๊มน้ำได้อย่างรวดเร็ว",
+      "name": "ควบคุมรีเลย์ 4 ช่อง",
+      "short_name": "รีเลย์",
+      "description": "ควบคุมปั๊มน้ำ โซน 1 โซน 2 และไฟศาลาได้อย่างรวดเร็ว",
       "url": "/index.html?mode=pump",
       "icons": [
         {

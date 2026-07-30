@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🌱 สวนลุงนะ Smart Farm - Admin V6</title>
+    <title>🌱 สวนลุงนะ Smart Farm - Admin V7</title>
     <meta name="theme-color" content="#10b981">
     <link rel="manifest" href="manifest.json">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    
+
     <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
@@ -161,7 +161,7 @@
         <div style="text-align: center;">
             <img src="suanlungna_icon_512.png" alt="Smart Farm Logo">
             <h1>สวนลุงนะ</h1>
-            <p>Smart Farm Admin V6</p>
+            <p>Smart Farm Admin V7</p>
             <div class="spinner"></div>
         </div>
     </div>
@@ -201,7 +201,7 @@
                         <div class="value" id="nodeStatus">OFFLINE</div>
                     </div>
                     <div class="status-box">
-                        <div class="label">ปั๊มน้ำ</div>
+                        <div class="label">รีเลย์ 1 / ปั๊มน้ำ</div>
                         <div class="value" id="pumpStatus">OFF</div>
                     </div>
                     <div class="status-box">
@@ -238,10 +238,10 @@
                 </div>
             </div>
 
-            <!-- PUMP CONTROL -->
+            <!-- RELAY CONTROL -->
             <div class="card">
-                <div class="section-title"><i class="fas fa-water"></i> ควบคุมปั๊มน้ำ</div>
-                <button class="btn btn-primary" onclick="togglePump()"><i class="fas fa-toggle-on"></i> เปิด/ปิดปั๊มน้ำ</button>
+                <div class="section-title"><i class="fas fa-plug"></i> ควบคุมรีเลย์ 4 ช่อง</div>
+                <div class="status-grid" id="relayControlGrid"></div>
                 <div style="display: flex; gap: 12px;">
                     <button class="btn btn-outline" onclick="setPumpMode('AUTO')" style="flex: 1;"><i class="fas fa-robot"></i> โหมด Auto</button>
                     <button class="btn btn-outline" onclick="setPumpMode('MANUAL')" style="flex: 1;"><i class="fas fa-hand-paper"></i> โหมด Manual</button>
@@ -339,19 +339,19 @@
 
     <!-- BOTTOM NAV -->
     <div class="bottom-nav">
-        <div class="nav-item active" onclick="showPage('home')">
+        <div class="nav-item active" data-page="home" onclick="showPage('home', this)">
             <i class="nav-icon fas fa-home"></i>
             <span class="nav-label">หน้าแรก</span>
         </div>
-        <div class="nav-item" onclick="showPage('charts')">
+        <div class="nav-item" data-page="charts" onclick="showPage('charts', this)">
             <i class="nav-icon fas fa-chart-line"></i>
             <span class="nav-label">กราฟ</span>
         </div>
-        <div class="nav-item" onclick="showPage('admin')">
+        <div class="nav-item" data-page="admin" onclick="showPage('admin', this)">
             <i class="nav-icon fas fa-user-shield"></i>
             <span class="nav-label">แอดมิน</span>
         </div>
-        <div class="nav-item" onclick="showPage('settings')">
+        <div class="nav-item" data-page="settings" onclick="showPage('settings', this)">
             <i class="nav-icon fas fa-cog"></i>
             <span class="nav-label">ตั้งค่า</span>
         </div>
@@ -369,6 +369,10 @@
         let tempChart = null;
         let humChart = null;
         let activityLog = JSON.parse(localStorage.getItem('smartfarm_logs')) || [];
+        const relayCount = 4;
+        const relayLabels = ['ปั๊มน้ำ', 'โซน 1', 'โซน 2', 'ไฟศาลา'];
+        const relayDataKeys = ['pump', 'zone1', 'zone2', 'pavilionLight'];
+        const relayStates = Array(relayCount).fill('OFF');
 
         // ==================== LOGGING ====================
         function addLog(message) {
@@ -404,7 +408,7 @@
             const hour = new Date().getHours();
             let greeting = '';
             let emoji = '';
-            
+
             if (hour >= 5 && hour < 12) {
                 greeting = 'สวัสดีตอนเช้า';
                 emoji = '🌅';
@@ -418,7 +422,7 @@
                 greeting = 'สวัสดีตอนกลางคืน';
                 emoji = '🌙';
             }
-            
+
             document.getElementById('greetingText').textContent = `${greeting} ${emoji}`;
         }
 
@@ -427,7 +431,7 @@
             const email = document.getElementById('loginEmail').value;
             const pass = document.getElementById('loginPass').value;
             const user = users.find(u => u.email === email && u.password === pass);
-            
+
             if (user) {
                 currentUser = user;
                 localStorage.setItem('smartfarm_currentUser', JSON.stringify(user));
@@ -454,11 +458,13 @@
         }
 
         // ==================== UI NAVIGATION ====================
-        function showPage(pageName) {
+        function showPage(pageName, navElement = null) {
             document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
             document.getElementById(pageName).classList.add('active');
             document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-            event.target.closest('.nav-item').classList.add('active');
+
+            const targetNav = navElement || document.querySelector(`.nav-item[data-page="${pageName}"]`);
+            if (targetNav) targetNav.classList.add('active');
         }
 
         function toggleDarkMode() {
@@ -467,9 +473,26 @@
             addLog(document.body.classList.contains('dark-mode') ? 'เปิดโหมดมืด' : 'ปิดโหมดมืด');
         }
 
+        function updateEnvironmentValue(type, value) {
+            const numericValue = Number(value);
+            if (Number.isNaN(numericValue)) return;
+
+            if (type === 'temperature') {
+                document.getElementById('temp').textContent = numericValue.toFixed(1) + '°C';
+                tempData.push(numericValue);
+                if (tempData.length > 10) tempData.shift();
+            } else if (type === 'humidity') {
+                document.getElementById('hum').textContent = numericValue.toFixed(1) + '%';
+                humData.push(numericValue);
+                if (humData.length > 10) humData.shift();
+            }
+
+            updateCharts();
+        }
+
         // ==================== MQTT CONNECTION ====================
         function initMQTT() {
-            const brokerUrl = 'wss://broker.hivemq.com:8884/mqtt';
+            const brokerUrl = 'wss://650188a0ee2b4367b7c131fb385590a9.s1.eu.hivemq.cloud:8884/mqtt';
             mqttClient = mqtt.connect(brokerUrl, {
                 clientId: 'smartfarm_' + Math.random().toString(16).substr(2, 9),
                 username: 'smartfarm',
@@ -483,19 +506,32 @@
                 document.getElementById('nodeStatus').textContent = 'ONLINE';
                 document.getElementById('nodeStatus').style.color = '#10b981';
                 addLog('เชื่อมต่อ MQTT สำเร็จ');
-                
-                mqttClient.subscribe(['farm/pump/status', 'farm/time', 'farm/soil', 'farm/light', 'farm/status', 'farm/mode', 'farm/temp', 'farm/hum']);
+
+                mqttClient.subscribe(['farm/time', 'farm/soil', 'farm/light', 'farm/status', 'farm/mode', 'farm/temp', 'farm/hum', 'farm/data', 'farm/relay/+/status']);
             });
 
             mqttClient.on('message', (topic, message) => {
                 const msg = message.toString();
                 console.log(`${topic}: ${msg}`);
-                
+
+                if (topic.startsWith('farm/relay/') && topic.endsWith('/status')) {
+                    const relayNumber = Number(topic.split('/')[2]);
+                    updateRelayState(relayNumber, msg === 'ON' ? 'ON' : 'OFF');
+                    addLog(`${relayLabels[relayNumber - 1] || `รีเลย์ ${relayNumber}`}: ${msg}`);
+                    return;
+                }
+
                 switch(topic) {
-                    case 'farm/pump/status':
-                        document.getElementById('pumpStatus').textContent = msg === 'ON' ? 'ON' : 'OFF';
-                        document.getElementById('pumpStatus').style.color = msg === 'ON' ? '#ef4444' : '#10b981';
-                        addLog(`ปั๊มน้ำ: ${msg}`);
+                    case 'farm/data':
+                        updateFromFarmData(msg);
+                        break;
+                    case 'farm/status':
+                        if (msg === 'ONLINE' || msg === 'OFFLINE') {
+                            document.getElementById('nodeStatus').textContent = msg;
+                            document.getElementById('nodeStatus').style.color = msg === 'ONLINE' ? '#10b981' : '#ef4444';
+                        } else {
+                            updateRelayState(1, msg === 'ON' ? 'ON' : 'OFF');
+                        }
                         break;
                     case 'farm/time':
                         document.getElementById('rtcTime').textContent = msg;
@@ -511,16 +547,10 @@
                         addLog(`โหมด: ${msg}`);
                         break;
                     case 'farm/temp':
-                        document.getElementById('temp').textContent = msg + '°C';
-                        tempData.push(msg);
-                        if (tempData.length > 10) tempData.shift();
-                        updateCharts();
+                        updateEnvironmentValue('temperature', msg);
                         break;
                     case 'farm/hum':
-                        document.getElementById('hum').textContent = msg + '%';
-                        humData.push(msg);
-                        if (humData.length > 10) humData.shift();
-                        updateCharts();
+                        updateEnvironmentValue('humidity', msg);
                         break;
                 }
             });
@@ -533,14 +563,64 @@
             });
         }
 
-        // ==================== PUMP CONTROL ====================
-        function togglePump() {
+        // ==================== RELAY CONTROL ====================
+        function renderRelayControls() {
+            const grid = document.getElementById('relayControlGrid');
+            grid.innerHTML = relayStates.map((state, index) => {
+                const relayNumber = index + 1;
+                const name = relayLabels[index];
+                return `
+                    <div class="status-box">
+                        <div class="label">Relay ${relayNumber} = ${name}</div>
+                        <div class="value" id="relay${relayNumber}Status" style="color: ${state === 'ON' ? '#ef4444' : '#10b981'};">${state}</div>
+                        <button class="btn btn-primary" onclick="toggleRelay(${relayNumber})" style="margin-top: 12px; margin-bottom: 0;">
+                            <i class="fas fa-toggle-on"></i> เปิด/ปิด
+                        </button>
+                    </div>
+                `;
+            }).join('');
+        }
+
+
+        function updateFromFarmData(payload) {
+            try {
+                const data = JSON.parse(payload);
+                if (data.temperature !== undefined) updateEnvironmentValue('temperature', data.temperature);
+                if (data.humidity !== undefined) updateEnvironmentValue('humidity', data.humidity);
+
+                relayDataKeys.forEach((key, index) => {
+                    if (data[key] !== undefined) {
+                        updateRelayState(index + 1, data[key] === 'ON' ? 'ON' : 'OFF');
+                    }
+                });
+            } catch (error) {
+                console.warn('Invalid farm/data payload:', payload);
+            }
+        }
+
+        function updateRelayState(relayNumber, state) {
+            if (relayNumber < 1 || relayNumber > relayCount) return;
+
+            relayStates[relayNumber - 1] = state;
+            const statusEl = document.getElementById(`relay${relayNumber}Status`);
+            if (statusEl) {
+                statusEl.textContent = state;
+                statusEl.style.color = state === 'ON' ? '#ef4444' : '#10b981';
+            }
+
+            if (relayNumber === 1) {
+                document.getElementById('pumpStatus').textContent = state;
+                document.getElementById('pumpStatus').style.color = state === 'ON' ? '#ef4444' : '#10b981';
+            }
+        }
+
+        function toggleRelay(relayNumber) {
             if (mqttClient && mqttClient.connected) {
-                const currentStatus = document.getElementById('pumpStatus').textContent;
-                const newStatus = currentStatus === 'ON' ? 'OFF' : 'ON';
-                mqttClient.publish('farm/pump', newStatus);
-                addLog(`สั่งปั๊มน้ำ: ${newStatus}`);
-                showToast(`ปั๊มน้ำ: ${newStatus}`);
+                const newStatus = relayStates[relayNumber - 1] === 'ON' ? 'OFF' : 'ON';
+                mqttClient.publish(`farm/relay/${relayNumber}/set`, newStatus);
+                if (relayNumber === 1) mqttClient.publish('farm/pump', newStatus);
+                addLog(`สั่ง${relayLabels[relayNumber - 1]}: ${newStatus}`);
+                showToast(`${relayLabels[relayNumber - 1]}: ${newStatus}`);
             } else {
                 showToast('ไม่ได้เชื่อมต่อ MQTT');
             }
@@ -559,7 +639,7 @@
         // ==================== CHARTS ====================
         function updateCharts() {
             if (!tempChart) initCharts();
-            
+
             tempChart.data.labels = tempData.map((_, i) => i + 1);
             tempChart.data.datasets[0].data = tempData;
             tempChart.update();
@@ -607,11 +687,22 @@
 
         // ==================== SCHEDULE ====================
         function showScheduleEditor() {
-            const time = prompt('ใส่เวลา (HH:MM):');
-            if (time && mqttClient && mqttClient.connected) {
-                mqttClient.publish('farm/schedule', time);
-                addLog(`ตั้งตารางเวลา: ${time}`);
-                showToast('บันทึกตารางเวลา: ' + time);
+            const schedule = prompt('ใส่ตารางเวลา 2 รอบ รูปแบบ เปิด1,ปิด1,เปิด2,ปิด2 เช่น 06:00,06:10,17:00,17:10:');
+            const isValidSchedule = /^\d{2}:\d{2},\d{2}:\d{2},\d{2}:\d{2},\d{2}:\d{2}$/.test(schedule || '');
+
+            if (!schedule) return;
+            if (!isValidSchedule) {
+                showToast('รูปแบบตารางเวลาไม่ถูกต้อง');
+                return;
+            }
+
+            if (mqttClient && mqttClient.connected) {
+                mqttClient.publish('farm/schedule', schedule);
+                document.getElementById('scheduleList').textContent = schedule;
+                addLog(`ตั้งตารางเวลา: ${schedule}`);
+                showToast('บันทึกตารางเวลา: ' + schedule);
+            } else {
+                showToast('ไม่ได้เชื่อมต่อ MQTT');
             }
         }
 
@@ -620,7 +711,7 @@
             const email = document.getElementById('newEmail').value;
             const pass = document.getElementById('newPass').value;
             const role = document.getElementById('newRole').value;
-            
+
             if (email && pass) {
                 users.push({ email, password: pass, role });
                 localStorage.setItem('smartfarm_users', JSON.stringify(users));
@@ -673,11 +764,12 @@
                 initMQTT();
                 updateGreeting();
             }
-            
+
             if (localStorage.getItem('smartfarm_darkMode') === 'true') {
                 document.body.classList.add('dark-mode');
             }
-            
+
+            renderRelayControls();
             renderUserList();
             renderLogs();
             addLog('ระบบเริ่มต้นสำเร็จ');
