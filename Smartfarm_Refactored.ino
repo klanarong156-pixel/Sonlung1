@@ -23,6 +23,7 @@ const char* topic_relay_set_suffix = "/set";
 const char* topic_time     = "farm/time";
 const char* topic_mode     = "farm/mode";
 const char* topic_schedule = "farm/schedule";
+const char* topic_schedule_status = "farm/schedule/status";
 const char* topic_temperature = "farm/temp";
 const char* topic_humidity = "farm/hum";
 const char* topic_sensor_data = "farm/data";
@@ -59,6 +60,8 @@ bool isAutoMode = true; // โหมดการทำงาน (true = Auto, fa
 bool relayStates[RELAY_COUNT] = {false, false, false, false}; // สถานะรีเลย์แต่ละช่อง (true = ON, false = OFF)
 float temperature = NAN;
 float humidity = NAN;
+bool rtcAvailable = false;
+unsigned long lastWiFiReconnect = 0;
 
 // ตัวแปรสำหรับจัดการเวลา (ไม่ต้องใช้ delay)
 unsigned long lastHeartbeat = 0;
@@ -69,6 +72,7 @@ const unsigned long HEARTBEAT_INTERVAL = 30000; // 30 วินาที
 const unsigned long RTC_INTERVAL = 1000;        // 1 วินาที
 const unsigned long DHT_INTERVAL = 2000;        // 2 วินาที
 const unsigned long MQTT_RECONNECT_INTERVAL = 5000; // 5 วินาที
+const unsigned long WIFI_RECONNECT_INTERVAL = 10000; // 10 วินาที
 
 // ==========================================
 // ออบเจ็กต์ต่างๆ
@@ -82,20 +86,39 @@ const int RELAY_STATE_EEPROM_ADDR = sizeof(ScheduleData);
 const int EEPROM_SIZE = sizeof(ScheduleData) + RELAY_COUNT;
 
 void publishSensorData();
+void publishScheduleStatus();
 
 // ==========================================
 // ฟังก์ชันอ่าน/เขียน EEPROM
 // ==========================================
+bool isValidScheduleTime(const char* value) {
+  if (strlen(value) != 5 || value[2] != ':') return false;
+  if (!isDigit(value[0]) || !isDigit(value[1]) || !isDigit(value[3]) || !isDigit(value[4])) return false;
+
+  byte hour = ((value[0] - '0') * 10) + (value[1] - '0');
+  byte minute = ((value[3] - '0') * 10) + (value[4] - '0');
+  return hour <= 23 && minute <= 59;
+}
+
+bool isValidScheduleData(const ScheduleData& data) {
+  return isValidScheduleTime(data.onTime1) && isValidScheduleTime(data.offTime1) &&
+         isValidScheduleTime(data.onTime2) && isValidScheduleTime(data.offTime2);
+}
+
+void setDefaultSchedule() {
+  strcpy(schedules.onTime1, "06:00");
+  strcpy(schedules.offTime1, "06:10");
+  strcpy(schedules.onTime2, "17:00");
+  strcpy(schedules.offTime2, "17:10");
+}
+
 void loadScheduleFromEEPROM() {
   EEPROM.begin(EEPROM_SIZE);
   EEPROM.get(0, schedules);
 
   // ตรวจสอบข้อมูลขยะ ถ้าใช่ให้ตั้งค่าเริ่มต้น
-  if (schedules.onTime1[2] != ':' || schedules.offTime1[2] != ':') {
-    strcpy(schedules.onTime1, "06:00");
-    strcpy(schedules.offTime1, "06:10");
-    strcpy(schedules.onTime2, "17:00");
-    strcpy(schedules.offTime2, "17:10");
+  if (!isValidScheduleData(schedules)) {
+    setDefaultSchedule();
     EEPROM.put(0, schedules);
     EEPROM.commit();
     Serial.println("Initialized Default Schedule in EEPROM");
@@ -193,7 +216,7 @@ void setPump(bool state) {
 // ฟังก์ชันส่งข้อมูลผ่าน MQTT (Publish)
 // ==========================================
 void publishTime() {
-  if (!rtc.begin()) return;
+  if (!rtcAvailable) return;
 
   DateTime now = rtc.now();
   char timeString[20];
@@ -208,6 +231,13 @@ void publishHeartbeat() {
 
 void publishMode() {
   client.publish(topic_mode, isAutoMode ? "AUTO" : "MANUAL", true);
+}
+
+void publishScheduleStatus() {
+  char scheduleBuffer[24];
+  snprintf(scheduleBuffer, sizeof(scheduleBuffer), "%s,%s,%s,%s",
+           schedules.onTime1, schedules.offTime1, schedules.onTime2, schedules.offTime2);
+  client.publish(topic_schedule_status, scheduleBuffer, true);
 }
 
 void publishSensorData() {
@@ -255,18 +285,46 @@ void readDHTSensor() {
 // ==========================================
 // ฟังก์ชันรับข้อมูลจาก MQTT (Callback)
 // ==========================================
+bool parseScheduleMessage(const String& msg, ScheduleData& parsedSchedule) {
+  int firstComma = msg.indexOf(',');
+  int secondComma = msg.indexOf(',', firstComma + 1);
+  int thirdComma = msg.indexOf(',', secondComma + 1);
+
+  if (firstComma <= 0 || secondComma <= firstComma || thirdComma <= secondComma) return false;
+  if (msg.indexOf(',', thirdComma + 1) != -1) return false;
+
+  String onTime1 = msg.substring(0, firstComma);
+  String offTime1 = msg.substring(firstComma + 1, secondComma);
+  String onTime2 = msg.substring(secondComma + 1, thirdComma);
+  String offTime2 = msg.substring(thirdComma + 1);
+  onTime1.trim();
+  offTime1.trim();
+  onTime2.trim();
+  offTime2.trim();
+
+  onTime1.toCharArray(parsedSchedule.onTime1, sizeof(parsedSchedule.onTime1));
+  offTime1.toCharArray(parsedSchedule.offTime1, sizeof(parsedSchedule.offTime1));
+  onTime2.toCharArray(parsedSchedule.onTime2, sizeof(parsedSchedule.onTime2));
+  offTime2.toCharArray(parsedSchedule.offTime2, sizeof(parsedSchedule.offTime2));
+
+  return isValidScheduleData(parsedSchedule);
+}
+
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  String msg = "";
+  String topicString(topic);
+  String msg;
+  msg.reserve(length);
   for (unsigned int i = 0; i < length; i++) {
     msg += (char)payload[i];
   }
+  msg.trim();
 
   Serial.println("=== MQTT Message Received ===");
-  Serial.print("Topic: "); Serial.println(topic);
+  Serial.print("Topic: "); Serial.println(topicString);
   Serial.print("Message: "); Serial.println(msg);
 
   // 1. ควบคุมปั๊มน้ำช่อง 1 แบบ Manual (topic เดิม)
-  if (String(topic) == topic_pump) {
+  if (topicString == topic_pump) {
     if (!isAutoMode) {
       if (msg == "ON") setPump(true);
       else if (msg == "OFF") setPump(false);
@@ -275,9 +333,15 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
   }
   // 1.1 ควบคุมรีเลย์ 4 ช่องแบบ Manual (farm/relay/1/set ... farm/relay/4/set)
-  else if (String(topic).startsWith(topic_relay_set_prefix) && String(topic).endsWith(topic_relay_set_suffix)) {
+  else if (topicString.startsWith(topic_relay_set_prefix) && topicString.endsWith(topic_relay_set_suffix)) {
     if (!isAutoMode) {
-      byte relayIndex = String(topic).substring(strlen(topic_relay_set_prefix), String(topic).length() - strlen(topic_relay_set_suffix)).toInt() - 1;
+      int relayNumber = topicString.substring(strlen(topic_relay_set_prefix), topicString.length() - strlen(topic_relay_set_suffix)).toInt();
+      if (relayNumber < 1 || relayNumber > RELAY_COUNT) {
+        Serial.println("Ignored: Invalid relay number");
+        return;
+      }
+
+      byte relayIndex = relayNumber - 1;
       if (msg == "ON") setRelay(relayIndex, true);
       else if (msg == "OFF") setRelay(relayIndex, false);
     } else {
@@ -285,7 +349,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
   }
   // 2. เปลี่ยนโหมด Auto/Manual
-  else if (String(topic) == topic_mode) {
+  else if (topicString == topic_mode) {
     if (msg == "AUTO") {
       isAutoMode = true;
       Serial.println("Mode changed to AUTO");
@@ -296,20 +360,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     publishMode();
   }
   // 3. ตั้งค่า Schedule (รูปแบบ: HH:MM,HH:MM,HH:MM,HH:MM)
-  else if (String(topic) == topic_schedule) {
-    // แยกข้อความด้วยเครื่องหมาย comma
-    int firstComma = msg.indexOf(',');
-    int secondComma = msg.indexOf(',', firstComma + 1);
-    int thirdComma = msg.indexOf(',', secondComma + 1);
-
-    if (firstComma > 0 && secondComma > 0 && thirdComma > 0) {
-      msg.substring(0, firstComma).toCharArray(schedules.onTime1, 6);
-      msg.substring(firstComma + 1, secondComma).toCharArray(schedules.offTime1, 6);
-      msg.substring(secondComma + 1, thirdComma).toCharArray(schedules.onTime2, 6);
-      msg.substring(thirdComma + 1).toCharArray(schedules.offTime2, 6);
-
+  else if (topicString == topic_schedule) {
+    ScheduleData parsedSchedule;
+    if (parseScheduleMessage(msg, parsedSchedule)) {
+      schedules = parsedSchedule;
       saveScheduleToEEPROM();
+      publishScheduleStatus();
       Serial.println("Schedule updated via MQTT");
+    } else {
+      Serial.println("Ignored: Invalid schedule format. Use HH:MM,HH:MM,HH:MM,HH:MM");
+      publishScheduleStatus();
     }
   }
 }
@@ -342,6 +402,7 @@ void connectMQTT() {
       // ส่งสถานะเริ่มต้น
       publishAllRelayStatus();
       publishMode();
+      publishScheduleStatus();
       publishSensorData();
     } else {
       Serial.print("Failed, rc=");
@@ -354,7 +415,7 @@ void connectMQTT() {
 // ฟังก์ชันตรวจสอบตารางเวลา (Schedule)
 // ==========================================
 void checkSchedule() {
-  if (!isAutoMode || !rtc.begin()) return;
+  if (!isAutoMode || !rtcAvailable) return;
 
   DateTime now = rtc.now();
   char buf[6];
@@ -417,6 +478,9 @@ void setup() {
   // ตั้งค่า WiFiManager (Auto Reconnect อยู่ในตัวแล้ว)
   WiFiManager wm;
   // รีเซ็ตค่า WiFi หากต้องการ (wm.resetSettings();)
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(false);
   Serial.println("Connecting to WiFi...");
   if (!wm.autoConnect("SmartFarm_Setup")) {
     Serial.println("Failed to connect WiFi, restarting...");
@@ -428,7 +492,8 @@ void setup() {
 
   // ตั้งค่า RTC
   Wire.begin(I2C_SDA, I2C_SCL);
-  if (!rtc.begin()) {
+  rtcAvailable = rtc.begin();
+  if (!rtcAvailable) {
     Serial.println("WARNING: RTC NOT FOUND!");
   } else {
     Serial.println("RTC OK");
@@ -462,6 +527,12 @@ void loop() {
 
   // ตรวจสอบการเชื่อมต่อ WiFi (Auto Reconnect)
   if (WiFi.status() != WL_CONNECTED) {
+    unsigned long currentMillis = millis();
+    if (currentMillis - lastWiFiReconnect >= WIFI_RECONNECT_INTERVAL) {
+      lastWiFiReconnect = currentMillis;
+      Serial.println("WiFi disconnected, reconnecting...");
+      WiFi.reconnect();
+    }
     return; // ข้ามการทำงานส่วนอื่นไปก่อน
   }
 

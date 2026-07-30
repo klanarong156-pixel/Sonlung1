@@ -507,7 +507,7 @@
                 document.getElementById('nodeStatus').style.color = '#10b981';
                 addLog('เชื่อมต่อ MQTT สำเร็จ');
 
-                mqttClient.subscribe(['farm/time', 'farm/soil', 'farm/light', 'farm/status', 'farm/mode', 'farm/temp', 'farm/hum', 'farm/data', 'farm/relay/+/status']);
+                mqttClient.subscribe(['farm/time', 'farm/soil', 'farm/light', 'farm/status', 'farm/mode', 'farm/temp', 'farm/hum', 'farm/data', 'farm/schedule/status', 'farm/relay/+/status']);
             });
 
             mqttClient.on('message', (topic, message) => {
@@ -543,8 +543,11 @@
                         document.getElementById('light').textContent = msg;
                         break;
                     case 'farm/mode':
-                        document.getElementById('modeStatus').textContent = msg;
+                        updatePumpMode(msg);
                         addLog(`โหมด: ${msg}`);
+                        break;
+                    case 'farm/schedule/status':
+                        renderSchedule(msg);
                         break;
                     case 'farm/temp':
                         updateEnvironmentValue('temperature', msg);
@@ -626,11 +629,19 @@
             }
         }
 
+        function updatePumpMode(mode) {
+            const normalizedMode = mode === 'MANUAL' ? 'MANUAL' : 'AUTO';
+            document.getElementById('modeStatus').textContent = normalizedMode;
+            document.getElementById('modeStatus').style.color = normalizedMode === 'AUTO' ? '#10b981' : '#f59e0b';
+        }
+
         function setPumpMode(mode) {
+            const normalizedMode = mode === 'MANUAL' ? 'MANUAL' : 'AUTO';
             if (mqttClient && mqttClient.connected) {
-                mqttClient.publish('farm/mode', mode);
-                addLog(`เปลี่ยนโหมด: ${mode}`);
-                showToast(`โหมด: ${mode}`);
+                mqttClient.publish('farm/mode', normalizedMode);
+                updatePumpMode(normalizedMode);
+                addLog(`เปลี่ยนโหมด: ${normalizedMode}`);
+                showToast(`โหมด: ${normalizedMode}`);
             } else {
                 showToast('ไม่ได้เชื่อมต่อ MQTT');
             }
@@ -686,21 +697,60 @@
         }
 
         // ==================== SCHEDULE ====================
-        function showScheduleEditor() {
-            const schedule = prompt('ใส่ตารางเวลา 2 รอบ รูปแบบ เปิด1,ปิด1,เปิด2,ปิด2 เช่น 06:00,06:10,17:00,17:10:');
-            const isValidSchedule = /^\d{2}:\d{2},\d{2}:\d{2},\d{2}:\d{2},\d{2}:\d{2}$/.test(schedule || '');
+        function isValidScheduleTime(time) {
+            const match = /^(\d{2}):(\d{2})$/.exec(time);
+            if (!match) return false;
 
-            if (!schedule) return;
-            if (!isValidSchedule) {
-                showToast('รูปแบบตารางเวลาไม่ถูกต้อง');
+            const hour = Number(match[1]);
+            const minute = Number(match[2]);
+            return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+        }
+
+        function parseSchedule(schedule) {
+            const parts = (schedule || '').split(',').map(part => part.trim());
+            if (parts.length !== 4 || !parts.every(isValidScheduleTime)) return null;
+
+            return {
+                morningOn: parts[0],
+                morningOff: parts[1],
+                eveningOn: parts[2],
+                eveningOff: parts[3]
+            };
+        }
+
+        function renderSchedule(schedule) {
+            const parsed = parseSchedule(schedule);
+            const scheduleList = document.getElementById('scheduleList');
+
+            if (!parsed) {
+                scheduleList.textContent = 'ยังไม่ได้ตั้งตารางเวลาอัตโนมัติ';
                 return;
             }
 
+            scheduleList.innerHTML = `
+                <div class="log-item"><span class="log-time">รอบเช้า</span> - เปิด ${parsed.morningOn} / ปิด ${parsed.morningOff}</div>
+                <div class="log-item"><span class="log-time">รอบเย็น</span> - เปิด ${parsed.eveningOn} / ปิด ${parsed.eveningOff}</div>
+            `;
+        }
+
+        function showScheduleEditor() {
+            const schedule = prompt('ใส่ตารางเวลา 2 รอบ รูปแบบ เปิด1,ปิด1,เปิด2,ปิด2 เช่น 06:00,06:10,17:00,17:10:');
+            if (!schedule) return;
+
+            const parsedSchedule = parseSchedule(schedule);
+            if (!parsedSchedule) {
+                showToast('รูปแบบเวลาต้องเป็น HH:MM และอยู่ในช่วง 00:00-23:59');
+                return;
+            }
+
+            const normalizedSchedule = [parsedSchedule.morningOn, parsedSchedule.morningOff, parsedSchedule.eveningOn, parsedSchedule.eveningOff].join(',');
             if (mqttClient && mqttClient.connected) {
-                mqttClient.publish('farm/schedule', schedule);
-                document.getElementById('scheduleList').textContent = schedule;
-                addLog(`ตั้งตารางเวลา: ${schedule}`);
-                showToast('บันทึกตารางเวลา: ' + schedule);
+                mqttClient.publish('farm/mode', 'AUTO');
+                mqttClient.publish('farm/schedule', normalizedSchedule);
+                updatePumpMode('AUTO');
+                renderSchedule(normalizedSchedule);
+                addLog(`ตั้งตารางเวลาอัตโนมัติ: ${normalizedSchedule}`);
+                showToast('บันทึกตารางเวลาอัตโนมัติ: ' + normalizedSchedule);
             } else {
                 showToast('ไม่ได้เชื่อมต่อ MQTT');
             }
@@ -770,6 +820,7 @@
             }
 
             renderRelayControls();
+            renderSchedule('');
             renderUserList();
             renderLogs();
             addLog('ระบบเริ่มต้นสำเร็จ');
