@@ -507,7 +507,7 @@
                 document.getElementById('nodeStatus').style.color = '#10b981';
                 addLog('เชื่อมต่อ MQTT สำเร็จ');
 
-                mqttClient.subscribe(['farm/time', 'farm/soil', 'farm/light', 'farm/status', 'farm/mode', 'farm/temp', 'farm/hum', 'farm/data', 'farm/schedule/status', 'farm/relay/+/status']);
+                mqttClient.subscribe(['farm/time', 'farm/soil', 'farm/light', 'farm/status', 'farm/mode', 'farm/temp', 'farm/hum', 'farm/data', 'farm/relay/+/status']);
             });
 
             mqttClient.on('message', (topic, message) => {
@@ -545,9 +545,6 @@
                     case 'farm/mode':
                         updatePumpMode(msg);
                         addLog(`โหมด: ${msg}`);
-                        break;
-                    case 'farm/schedule/status':
-                        renderSchedule(msg);
                         break;
                     case 'farm/temp':
                         updateEnvironmentValue('temperature', msg);
@@ -820,7 +817,6 @@
             }
 
             renderRelayControls();
-            renderSchedule('');
             renderUserList();
             renderLogs();
             addLog('ระบบเริ่มต้นสำเร็จ');

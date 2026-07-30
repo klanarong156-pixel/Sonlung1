@@ -23,7 +23,6 @@ const char* topic_relay_set_suffix = "/set";
 const char* topic_time     = "farm/time";
 const char* topic_mode     = "farm/mode";
 const char* topic_schedule = "farm/schedule";
-const char* topic_schedule_status = "farm/schedule/status";
 const char* topic_temperature = "farm/temp";
 const char* topic_humidity = "farm/hum";
 const char* topic_sensor_data = "farm/data";
@@ -91,7 +90,6 @@ const int RELAY_STATE_EEPROM_ADDR = sizeof(ScheduleData);
 const int EEPROM_SIZE = sizeof(ScheduleData) + RELAY_COUNT;
 
 void publishSensorData();
-void publishScheduleStatus();
 
 bool schedulesAreEqual(const ScheduleData& left, const ScheduleData& right) {
   return strncmp(left.onTime1, right.onTime1, sizeof(left.onTime1)) == 0 &&
@@ -265,13 +263,6 @@ void publishHeartbeat() {
 
 void publishMode() {
   client.publish(topic_mode, isAutoMode ? "AUTO" : "MANUAL", true);
-}
-
-void publishScheduleStatus() {
-  char scheduleBuffer[24];
-  snprintf(scheduleBuffer, sizeof(scheduleBuffer), "%s,%s,%s,%s",
-           schedules.onTime1, schedules.offTime1, schedules.onTime2, schedules.offTime2);
-  client.publish(topic_schedule_status, scheduleBuffer, true);
 }
 
 void publishSensorData() {
@@ -458,11 +449,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         } else {
           Serial.println("Schedule unchanged");
         }
-        publishScheduleStatus();
         Serial.println("Schedule updated via MQTT");
       } else {
         Serial.println("Ignored: Invalid schedule format. Use HH:MM,HH:MM,HH:MM,HH:MM");
-        publishScheduleStatus();
       }
     }
   }
@@ -499,7 +488,6 @@ void connectMQTT() {
       // ส่งสถานะเริ่มต้น
       publishAllRelayStatus();
       publishMode();
-      publishScheduleStatus();
       publishSensorData();
     } else {
       Serial.print("Failed, rc=");
