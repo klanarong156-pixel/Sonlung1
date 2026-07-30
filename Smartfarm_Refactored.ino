@@ -73,6 +73,7 @@ const unsigned long DHT_INTERVAL = 2000;        // 2 วินาที
 const unsigned long MQTT_RECONNECT_INTERVAL = 5000; // 5 วินาที
 const unsigned long WIFI_RECONNECT_INTERVAL = 10000; // 10 วินาที
 const byte DHT_MAX_RETRIES = 3;
+const size_t MQTT_PAYLOAD_BUFFER_SIZE = 80; // รองรับ payload อย่างน้อย 64 bytes + null terminator
 const float DHT_MIN_TEMPERATURE = -10.0;
 const float DHT_MAX_TEMPERATURE = 60.0;
 const float DHT_MIN_HUMIDITY = 0.0;
@@ -90,6 +91,7 @@ const int RELAY_STATE_EEPROM_ADDR = sizeof(ScheduleData);
 const int EEPROM_SIZE = sizeof(ScheduleData) + RELAY_COUNT;
 
 void publishSensorData();
+void restartAfterWiFiManagerFailure();
 
 bool schedulesAreEqual(const ScheduleData& left, const ScheduleData& right) {
   return strncmp(left.onTime1, right.onTime1, sizeof(left.onTime1)) == 0 &&
@@ -392,7 +394,7 @@ bool parseRelayTopic(const char* topic, byte& relayIndex) {
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  char msg[32];
+  char msg[MQTT_PAYLOAD_BUFFER_SIZE];
   bool hasTextPayload = copyPayload(msg, sizeof(msg), payload, length);
 
   Serial.println("=== MQTT Message Received ===");
@@ -474,7 +476,8 @@ void connectMQTT() {
       Serial.println("Connected!");
 
       // สมัครรับข้อมูล Topics ที่ต้องการ
-      bool subscribed = client.subscribe(topic_pump);
+      bool subscribed = true;
+      subscribed = client.subscribe(topic_pump) && subscribed;
       for (byte i = 0; i < RELAY_COUNT; i++) {
         char relayTopic[32];
         snprintf(relayTopic, sizeof(relayTopic), "farm/relay/%d/set", i + 1);
@@ -543,6 +546,14 @@ void checkSchedule() {
   }
 }
 
+void restartAfterWiFiManagerFailure() {
+  unsigned long startMillis = millis();
+  while (millis() - startMillis < 3000) {
+    yield();
+  }
+  ESP.restart();
+}
+
 // ==========================================
 // Setup Function
 // ==========================================
@@ -575,8 +586,7 @@ void setup() {
   Serial.println("Connecting to WiFi...");
   if (!wm.autoConnect("SmartFarm_Setup")) {
     Serial.println("Failed to connect WiFi, restarting...");
-    delay(3000);
-    ESP.restart();
+    restartAfterWiFiManagerFailure();
   }
   Serial.println("WiFi Connected!");
   Serial.print("IP Address: "); Serial.println(WiFi.localIP());
@@ -602,6 +612,8 @@ void setup() {
   espClient.setInsecure(); // ไม่ตรวจสอบ Certificate
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(mqttCallback);
+  client.setKeepAlive(30);
+  client.setSocketTimeout(5);
 
   // เปิดใช้งาน Watchdog Timer
   ESP.wdtEnable(WDTO_8S); // รีเซ็ตบอร์ดถ้าค้างเกิน 8 วินาที
