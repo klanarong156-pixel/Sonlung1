@@ -5,6 +5,7 @@
 #include <Wire.h>
 #include <RTClib.h>
 #include <EEPROM.h>
+#include <DHT.h>
 
 // ==========================================
 // การตั้งค่า MQTT (HiveMQ Cloud)
@@ -22,12 +23,19 @@ const char* topic_relay_set_suffix = "/set";
 const char* topic_time     = "farm/time";
 const char* topic_mode     = "farm/mode";
 const char* topic_schedule = "farm/schedule";
+const char* topic_temperature = "farm/temp";
+const char* topic_humidity = "farm/hum";
+const char* topic_sensor_data = "farm/data";
 
 // ==========================================
 // การตั้งค่า Hardware
 // ==========================================
 const byte RELAY_COUNT = 4;
-const byte RELAY_PINS[RELAY_COUNT] = {D5, D6, D7, D8}; // ขาควบคุมรีเลย์ 4 ช่อง (Active LOW)
+const byte RELAY_PINS[RELAY_COUNT] = {D5, D6, D7, D0}; // รีเลย์ 4 ช่อง: ปั๊มน้ำ, โซน 1, โซน 2, ไฟศาลา
+const char* RELAY_NAMES[RELAY_COUNT] = {"pump", "zone1", "zone2", "pavilionLight"};
+const bool RELAY_ACTIVE_LOW = true; // true = Active LOW, false = Active HIGH
+#define DHT_PIN D4   // GPIO2 ว่างจาก RTC/รีเลย์ และเหมาะกับ DHT11 พร้อม pull-up
+#define DHTTYPE DHT11
 #define I2C_SDA D2   // ขา SDA ของ RTC
 #define I2C_SCL D1   // ขา SCL ของ RTC
 
@@ -49,13 +57,17 @@ String lastScheduleAction = "";
 // ==========================================
 bool isAutoMode = true; // โหมดการทำงาน (true = Auto, false = Manual)
 bool relayStates[RELAY_COUNT] = {false, false, false, false}; // สถานะรีเลย์แต่ละช่อง (true = ON, false = OFF)
+float temperature = NAN;
+float humidity = NAN;
 
 // ตัวแปรสำหรับจัดการเวลา (ไม่ต้องใช้ delay)
 unsigned long lastHeartbeat = 0;
 unsigned long lastRTCUpdate = 0;
+unsigned long lastDHTRead = 0;
 unsigned long lastMQTTReconnect = 0;
 const unsigned long HEARTBEAT_INTERVAL = 30000; // 30 วินาที
 const unsigned long RTC_INTERVAL = 1000;        // 1 วินาที
+const unsigned long DHT_INTERVAL = 2000;        // 2 วินาที
 const unsigned long MQTT_RECONNECT_INTERVAL = 5000; // 5 วินาที
 
 // ==========================================
@@ -64,14 +76,20 @@ const unsigned long MQTT_RECONNECT_INTERVAL = 5000; // 5 วินาที
 RTC_DS3231 rtc;
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
+DHT dht(DHT_PIN, DHTTYPE);
+
+const int RELAY_STATE_EEPROM_ADDR = sizeof(ScheduleData);
+const int EEPROM_SIZE = sizeof(ScheduleData) + RELAY_COUNT;
+
+void publishSensorData();
 
 // ==========================================
 // ฟังก์ชันอ่าน/เขียน EEPROM
 // ==========================================
 void loadScheduleFromEEPROM() {
-  EEPROM.begin(sizeof(ScheduleData));
+  EEPROM.begin(EEPROM_SIZE);
   EEPROM.get(0, schedules);
-  
+
   // ตรวจสอบข้อมูลขยะ ถ้าใช่ให้ตั้งค่าเริ่มต้น
   if (schedules.onTime1[2] != ':' || schedules.offTime1[2] != ':') {
     strcpy(schedules.onTime1, "06:00");
@@ -88,15 +106,42 @@ void loadScheduleFromEEPROM() {
 }
 
 void saveScheduleToEEPROM() {
-  EEPROM.begin(sizeof(ScheduleData));
+  EEPROM.begin(EEPROM_SIZE);
   EEPROM.put(0, schedules);
   EEPROM.commit();
   EEPROM.end();
   Serial.println("Saved Schedule to EEPROM");
 }
 
+
+void loadRelayStatesFromEEPROM() {
+  EEPROM.begin(EEPROM_SIZE);
+  for (byte i = 0; i < RELAY_COUNT; i++) {
+    byte savedState = EEPROM.read(RELAY_STATE_EEPROM_ADDR + i);
+    relayStates[i] = savedState == 1;
+  }
+  EEPROM.end();
+  Serial.println("Loaded Relay States from EEPROM");
+}
+
+void saveRelayStateToEEPROM(byte relayIndex) {
+  if (relayIndex >= RELAY_COUNT) return;
+
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.write(RELAY_STATE_EEPROM_ADDR + relayIndex, relayStates[relayIndex] ? 1 : 0);
+  EEPROM.commit();
+  EEPROM.end();
+}
+
+void writeRelayPin(byte relayIndex) {
+  if (relayIndex >= RELAY_COUNT) return;
+
+  bool outputLevel = RELAY_ACTIVE_LOW ? !relayStates[relayIndex] : relayStates[relayIndex];
+  digitalWrite(RELAY_PINS[relayIndex], outputLevel ? HIGH : LOW);
+}
+
 // ==========================================
-// ฟังก์ชันควบคุมปั๊มน้ำ
+// ฟังก์ชันควบคุมรีเลย์
 // ==========================================
 void publishRelayStatus(byte relayIndex) {
   if (relayIndex >= RELAY_COUNT) return;
@@ -124,16 +169,20 @@ void setRelay(byte relayIndex, bool state) {
   if (relayStates[relayIndex] == state) return;
 
   relayStates[relayIndex] = state;
-  // Relay Active LOW: LOW = เปิด, HIGH = ปิด
-  digitalWrite(RELAY_PINS[relayIndex], state ? LOW : HIGH);
+  writeRelayPin(relayIndex);
+  saveRelayStateToEEPROM(relayIndex);
 
   Serial.print("Relay ");
   Serial.print(relayIndex + 1);
+  Serial.print(" (");
+  Serial.print(RELAY_NAMES[relayIndex]);
+  Serial.print(")");
   Serial.print(" turned ");
   Serial.println(state ? "ON" : "OFF");
 
   // ส่งสถานะไปยัง MQTT
   publishRelayStatus(relayIndex);
+  publishSensorData();
 }
 
 void setPump(bool state) {
@@ -145,7 +194,7 @@ void setPump(bool state) {
 // ==========================================
 void publishTime() {
   if (!rtc.begin()) return;
-  
+
   DateTime now = rtc.now();
   char timeString[20];
   sprintf(timeString, "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
@@ -161,6 +210,48 @@ void publishMode() {
   client.publish(topic_mode, isAutoMode ? "AUTO" : "MANUAL", true);
 }
 
+void publishSensorData() {
+  if (!client.connected() || isnan(temperature) || isnan(humidity)) return;
+
+  char tempBuffer[12];
+  char humBuffer[12];
+  dtostrf(temperature, 4, 1, tempBuffer);
+  dtostrf(humidity, 4, 1, humBuffer);
+  client.publish(topic_temperature, tempBuffer, true);
+  client.publish(topic_humidity, humBuffer, true);
+
+  char jsonBuffer[180];
+  snprintf(jsonBuffer, sizeof(jsonBuffer),
+           "{\"temperature\":%.1f,\"humidity\":%.1f,\"pump\":\"%s\",\"zone1\":\"%s\",\"zone2\":\"%s\",\"pavilionLight\":\"%s\"}",
+           temperature, humidity,
+           relayStates[0] ? "ON" : "OFF",
+           relayStates[1] ? "ON" : "OFF",
+           relayStates[2] ? "ON" : "OFF",
+           relayStates[3] ? "ON" : "OFF");
+  client.publish(topic_sensor_data, jsonBuffer, true);
+}
+
+void readDHTSensor() {
+  float newHumidity = dht.readHumidity();
+  float newTemperature = dht.readTemperature();
+
+  if (isnan(newHumidity) || isnan(newTemperature)) {
+    Serial.println("WARNING: Failed to read from DHT11 sensor");
+    return;
+  }
+
+  humidity = newHumidity;
+  temperature = newTemperature;
+
+  Serial.print("DHT11 Temperature: ");
+  Serial.print(temperature);
+  Serial.print(" C, Humidity: ");
+  Serial.print(humidity);
+  Serial.println(" %");
+
+  publishSensorData();
+}
+
 // ==========================================
 // ฟังก์ชันรับข้อมูลจาก MQTT (Callback)
 // ==========================================
@@ -169,11 +260,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   for (unsigned int i = 0; i < length; i++) {
     msg += (char)payload[i];
   }
-  
+
   Serial.println("=== MQTT Message Received ===");
   Serial.print("Topic: "); Serial.println(topic);
   Serial.print("Message: "); Serial.println(msg);
-  
+
   // 1. ควบคุมปั๊มน้ำช่อง 1 แบบ Manual (topic เดิม)
   if (String(topic) == topic_pump) {
     if (!isAutoMode) {
@@ -210,13 +301,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     int firstComma = msg.indexOf(',');
     int secondComma = msg.indexOf(',', firstComma + 1);
     int thirdComma = msg.indexOf(',', secondComma + 1);
-    
+
     if (firstComma > 0 && secondComma > 0 && thirdComma > 0) {
       msg.substring(0, firstComma).toCharArray(schedules.onTime1, 6);
       msg.substring(firstComma + 1, secondComma).toCharArray(schedules.offTime1, 6);
       msg.substring(secondComma + 1, thirdComma).toCharArray(schedules.onTime2, 6);
       msg.substring(thirdComma + 1).toCharArray(schedules.offTime2, 6);
-      
+
       saveScheduleToEEPROM();
       Serial.println("Schedule updated via MQTT");
     }
@@ -228,16 +319,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 // ==========================================
 void connectMQTT() {
   if (client.connected()) return;
-  
+
   unsigned long currentMillis = millis();
   if (currentMillis - lastMQTTReconnect >= MQTT_RECONNECT_INTERVAL) {
     lastMQTTReconnect = currentMillis;
-    
+
     Serial.print("Connecting to MQTT...");
     // กำหนด Last Will and Testament (LWT) สำหรับแจ้ง Offline
     if (client.connect("ESP8266Farm", mqtt_user, mqtt_pass, topic_status, 0, true, "OFFLINE")) {
       Serial.println("Connected!");
-      
+
       // สมัครรับข้อมูล Topics ที่ต้องการ
       client.subscribe(topic_pump);
       for (byte i = 0; i < RELAY_COUNT; i++) {
@@ -247,10 +338,11 @@ void connectMQTT() {
       }
       client.subscribe(topic_mode);
       client.subscribe(topic_schedule);
-      
+
       // ส่งสถานะเริ่มต้น
       publishAllRelayStatus();
       publishMode();
+      publishSensorData();
     } else {
       Serial.print("Failed, rc=");
       Serial.println(client.state());
@@ -263,12 +355,12 @@ void connectMQTT() {
 // ==========================================
 void checkSchedule() {
   if (!isAutoMode || !rtc.begin()) return;
-  
+
   DateTime now = rtc.now();
   char buf[6];
   sprintf(buf, "%02d:%02d", now.hour(), now.minute());
   String currentTime = String(buf);
-  
+
   // Schedule 1 ON
   if (currentTime == schedules.onTime1 && lastScheduleAction != "S1ON") {
     setPump(true);
@@ -293,9 +385,9 @@ void checkSchedule() {
     Serial.println("Auto: Schedule 2 OFF");
     lastScheduleAction = "S2OFF";
   }
-  
+
   // รีเซ็ตสถานะเมื่อผ่านไป 1 นาที (เพื่อรองรับวันถัดไป)
-  if (currentTime != schedules.onTime1 && currentTime != schedules.offTime1 && 
+  if (currentTime != schedules.onTime1 && currentTime != schedules.offTime1 &&
       currentTime != schedules.onTime2 && currentTime != schedules.offTime2) {
     lastScheduleAction = "";
   }
@@ -307,17 +399,21 @@ void checkSchedule() {
 void setup() {
   Serial.begin(115200);
   Serial.println("\n===== SMART FARM SYSTEM STARTING =====");
-  
+
   // ตั้งค่า Relay (ปิดปั๊มเป็นค่าเริ่มต้น)
   for (byte i = 0; i < RELAY_COUNT; i++) {
     pinMode(RELAY_PINS[i], OUTPUT);
-    digitalWrite(RELAY_PINS[i], HIGH);
     relayStates[i] = false;
+    writeRelayPin(i);
   }
-  
-  // โหลด Schedule จาก EEPROM
+
+  // โหลด Schedule และสถานะรีเลย์จาก EEPROM
   loadScheduleFromEEPROM();
-  
+  loadRelayStatesFromEEPROM();
+  for (byte i = 0; i < RELAY_COUNT; i++) {
+    writeRelayPin(i);
+  }
+
   // ตั้งค่า WiFiManager (Auto Reconnect อยู่ในตัวแล้ว)
   WiFiManager wm;
   // รีเซ็ตค่า WiFi หากต้องการ (wm.resetSettings();)
@@ -329,7 +425,7 @@ void setup() {
   }
   Serial.println("WiFi Connected!");
   Serial.print("IP Address: "); Serial.println(WiFi.localIP());
-  
+
   // ตั้งค่า RTC
   Wire.begin(I2C_SDA, I2C_SCL);
   if (!rtc.begin()) {
@@ -341,15 +437,19 @@ void setup() {
       rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
     }
   }
-  
+
+  // ตั้งค่า DHT11
+  dht.begin();
+  Serial.println("DHT11 Initialized");
+
   // ตั้งค่า MQTT
   espClient.setInsecure(); // ไม่ตรวจสอบ Certificate
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(mqttCallback);
-  
+
   // เปิดใช้งาน Watchdog Timer
   ESP.wdtEnable(WDTO_8S); // รีเซ็ตบอร์ดถ้าค้างเกิน 8 วินาที
-  
+
   Serial.println("System Initialized.");
 }
 
@@ -359,29 +459,35 @@ void setup() {
 void loop() {
   // รีเซ็ต Watchdog Timer ทุกรอบ
   ESP.wdtFeed();
-  
+
   // ตรวจสอบการเชื่อมต่อ WiFi (Auto Reconnect)
   if (WiFi.status() != WL_CONNECTED) {
     return; // ข้ามการทำงานส่วนอื่นไปก่อน
   }
-  
+
   // จัดการ MQTT
   if (!client.connected()) {
     connectMQTT();
   } else {
     client.loop();
   }
-  
+
   unsigned long currentMillis = millis();
-  
+
   // 1. ตรวจสอบเวลาทุก 1 วินาที (สำหรับส่งเวลาและเช็คตารางเวลา)
   if (currentMillis - lastRTCUpdate >= RTC_INTERVAL) {
     lastRTCUpdate = currentMillis;
     if (client.connected()) publishTime();
     checkSchedule();
   }
-  
-  // 2. ส่ง Heartbeat ทุก 30 วินาที
+
+  // 2. อ่าน DHT11 ทุก 2 วินาทีแบบ Non-blocking
+  if (currentMillis - lastDHTRead >= DHT_INTERVAL) {
+    lastDHTRead = currentMillis;
+    readDHTSensor();
+  }
+
+  // 3. ส่ง Heartbeat ทุก 30 วินาที
   if (currentMillis - lastHeartbeat >= HEARTBEAT_INTERVAL) {
     lastHeartbeat = currentMillis;
     if (client.connected()) publishHeartbeat();
