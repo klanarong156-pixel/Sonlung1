@@ -15,8 +15,10 @@ const char* mqtt_user = "smartfarm";
 const char* mqtt_pass = "Kla12345";
 
 // MQTT Topics
-const char* topic_pump     = "farm/pump";
+const char* topic_pump     = "farm/pump"; // Legacy: relay 1
 const char* topic_status   = "farm/status";
+const char* topic_relay_set_prefix = "farm/relay/";
+const char* topic_relay_set_suffix = "/set";
 const char* topic_time     = "farm/time";
 const char* topic_mode     = "farm/mode";
 const char* topic_schedule = "farm/schedule";
@@ -24,7 +26,8 @@ const char* topic_schedule = "farm/schedule";
 // ==========================================
 // การตั้งค่า Hardware
 // ==========================================
-#define RELAY_PIN D5 // ขาควบคุมรีเลย์ปั๊มน้ำ (Active LOW)
+const byte RELAY_COUNT = 4;
+const byte RELAY_PINS[RELAY_COUNT] = {D5, D6, D7, D8}; // ขาควบคุมรีเลย์ 4 ช่อง (Active LOW)
 #define I2C_SDA D2   // ขา SDA ของ RTC
 #define I2C_SCL D1   // ขา SCL ของ RTC
 
@@ -45,7 +48,7 @@ String lastScheduleAction = "";
 // ตัวแปรระบบ
 // ==========================================
 bool isAutoMode = true; // โหมดการทำงาน (true = Auto, false = Manual)
-bool pumpState = false; // สถานะปั๊มน้ำ (true = ON, false = OFF)
+bool relayStates[RELAY_COUNT] = {false, false, false, false}; // สถานะรีเลย์แต่ละช่อง (true = ON, false = OFF)
 
 // ตัวแปรสำหรับจัดการเวลา (ไม่ต้องใช้ delay)
 unsigned long lastHeartbeat = 0;
@@ -95,19 +98,46 @@ void saveScheduleToEEPROM() {
 // ==========================================
 // ฟังก์ชันควบคุมปั๊มน้ำ
 // ==========================================
-void setPump(bool state) {
+void publishRelayStatus(byte relayIndex) {
+  if (relayIndex >= RELAY_COUNT) return;
+
+  char topicBuffer[32];
+  snprintf(topicBuffer, sizeof(topicBuffer), "farm/relay/%d/status", relayIndex + 1);
+  client.publish(topicBuffer, relayStates[relayIndex] ? "ON" : "OFF", true);
+
+  // ส่งสถานะปั๊มน้ำช่อง 1 ไปยัง topic เดิม เพื่อให้ dashboard รุ่นเก่ายังใช้งานได้
+  if (relayIndex == 0) {
+    client.publish(topic_status, relayStates[relayIndex] ? "ON" : "OFF", true);
+  }
+}
+
+void publishAllRelayStatus() {
+  for (byte i = 0; i < RELAY_COUNT; i++) {
+    publishRelayStatus(i);
+  }
+}
+
+void setRelay(byte relayIndex, bool state) {
+  if (relayIndex >= RELAY_COUNT) return;
+
   // ป้องกันการเปิด/ปิดซ้ำ
-  if (pumpState == state) return;
-  
-  pumpState = state;
+  if (relayStates[relayIndex] == state) return;
+
+  relayStates[relayIndex] = state;
   // Relay Active LOW: LOW = เปิด, HIGH = ปิด
-  digitalWrite(RELAY_PIN, state ? LOW : HIGH);
-  
-  Serial.print("Pump turned ");
+  digitalWrite(RELAY_PINS[relayIndex], state ? LOW : HIGH);
+
+  Serial.print("Relay ");
+  Serial.print(relayIndex + 1);
+  Serial.print(" turned ");
   Serial.println(state ? "ON" : "OFF");
-  
+
   // ส่งสถานะไปยัง MQTT
-  client.publish(topic_status, state ? "ON" : "OFF", true);
+  publishRelayStatus(relayIndex);
+}
+
+void setPump(bool state) {
+  setRelay(0, state);
 }
 
 // ==========================================
@@ -144,11 +174,21 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Topic: "); Serial.println(topic);
   Serial.print("Message: "); Serial.println(msg);
   
-  // 1. ควบคุมปั๊มน้ำแบบ Manual
+  // 1. ควบคุมปั๊มน้ำช่อง 1 แบบ Manual (topic เดิม)
   if (String(topic) == topic_pump) {
     if (!isAutoMode) {
       if (msg == "ON") setPump(true);
       else if (msg == "OFF") setPump(false);
+    } else {
+      Serial.println("Ignored: System is in AUTO mode");
+    }
+  }
+  // 1.1 ควบคุมรีเลย์ 4 ช่องแบบ Manual (farm/relay/1/set ... farm/relay/4/set)
+  else if (String(topic).startsWith(topic_relay_set_prefix) && String(topic).endsWith(topic_relay_set_suffix)) {
+    if (!isAutoMode) {
+      byte relayIndex = String(topic).substring(strlen(topic_relay_set_prefix), String(topic).length() - strlen(topic_relay_set_suffix)).toInt() - 1;
+      if (msg == "ON") setRelay(relayIndex, true);
+      else if (msg == "OFF") setRelay(relayIndex, false);
     } else {
       Serial.println("Ignored: System is in AUTO mode");
     }
@@ -200,11 +240,16 @@ void connectMQTT() {
       
       // สมัครรับข้อมูล Topics ที่ต้องการ
       client.subscribe(topic_pump);
+      for (byte i = 0; i < RELAY_COUNT; i++) {
+        char relayTopic[32];
+        snprintf(relayTopic, sizeof(relayTopic), "farm/relay/%d/set", i + 1);
+        client.subscribe(relayTopic);
+      }
       client.subscribe(topic_mode);
       client.subscribe(topic_schedule);
       
       // ส่งสถานะเริ่มต้น
-      client.publish(topic_status, pumpState ? "ON" : "OFF", true);
+      publishAllRelayStatus();
       publishMode();
     } else {
       Serial.print("Failed, rc=");
@@ -264,9 +309,11 @@ void setup() {
   Serial.println("\n===== SMART FARM SYSTEM STARTING =====");
   
   // ตั้งค่า Relay (ปิดปั๊มเป็นค่าเริ่มต้น)
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH);
-  pumpState = false;
+  for (byte i = 0; i < RELAY_COUNT; i++) {
+    pinMode(RELAY_PINS[i], OUTPUT);
+    digitalWrite(RELAY_PINS[i], HIGH);
+    relayStates[i] = false;
+  }
   
   // โหลด Schedule จาก EEPROM
   loadScheduleFromEEPROM();
