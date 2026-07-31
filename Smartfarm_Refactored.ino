@@ -9,747 +9,149 @@
 #include <ctype.h>
 #include <string.h>
 
-// ==========================================
-// การตั้งค่า MQTT (HiveMQ Cloud)
-// ==========================================
 const char* mqtt_server = "650188a0ee2b4367b7c131fb385590a9.s1.eu.hivemq.cloud";
 const int mqtt_port = 8883;
 const char* mqtt_user = "smartfarm";
 const char* mqtt_pass = "Kla12345";
 
-// MQTT Topics
-const char* topic_pump     = "farm/pump"; // Legacy: relay 1
+const char* topic_pump = "farm/pump";
 const char* topic_pump_status = "farm/pump/status";
 const char* topic_pump_countdown = "farm/pump/countdown";
 const char* topic_pump_countdown_start = "farm/pump/countdown/start";
 const char* topic_pump_countdown_stop = "farm/pump/countdown/stop";
 const char* topic_pump_duration = "farm/pump/duration";
-const char* topic_status   = "farm/status";
+const char* topic_status = "farm/status";
 const char* topic_relay_set_prefix = "farm/relay/";
 const char* topic_relay_set_suffix = "/set";
-const char* topic_time     = "farm/time";
-const char* topic_mode     = "farm/mode";
+const char* topic_time = "farm/time";
+const char* topic_mode = "farm/mode";
 const char* topic_schedule = "farm/schedule";
 const char* topic_schedule_status = "farm/schedule/status";
 const char* topic_temperature = "farm/temp";
 const char* topic_humidity = "farm/hum";
 const char* topic_sensor_data = "farm/data";
 
-// ==========================================
-// การตั้งค่า Hardware
-// ==========================================
 const byte RELAY_COUNT = 4;
-const byte RELAY_PINS[RELAY_COUNT] = {D5, D6, D7, D0}; // รีเลย์ 4 ช่อง: ปั๊มน้ำ, โซน 1, โซน 2, ไฟศาลา
-const char* RELAY_NAMES[RELAY_COUNT] = {"pump", "zone1", "zone2", "pavilionLight"};
-const bool RELAY_ACTIVE_LOW = true; // true = Active LOW, false = Active HIGH
-#define DHT_PIN D4   // GPIO2 ว่างจาก RTC/รีเลย์ และเหมาะกับ DHT11 พร้อม pull-up
+const byte RELAY_PINS[RELAY_COUNT] = {D5, D6, D7, D0};
+const char* RELAY_NAMES[RELAY_COUNT] = {"pump", "zone1", "zone2", "zone3"};
+const bool RELAY_ACTIVE_LOW = true;
+#define DHT_PIN D4
 #define DHTTYPE DHT11
-#define I2C_SDA D2   // ขา SDA ของ RTC
-#define I2C_SCL D1   // ขา SCL ของ RTC
+#define I2C_SDA D2
+#define I2C_SCL D1
 
-// ==========================================
-// โครงสร้างข้อมูลสำหรับ Schedule
-// ==========================================
-struct ScheduleData {
-  char onTime1[6];  // "HH:MM"
-  char offTime1[6]; // "HH:MM"
-  char onTime2[6];  // "HH:MM"
-  char offTime2[6]; // "HH:MM"
-};
-
-ScheduleData schedules;
-char lastScheduleAction[6] = "";
-
-// ==========================================
-// ตัวแปรระบบ
-// ==========================================
-bool isAutoMode = true; // โหมดการทำงาน (true = Auto, false = Manual)
-bool relayStates[RELAY_COUNT] = {false, false, false, false}; // สถานะรีเลย์แต่ละช่อง (true = ON, false = OFF)
-float temperature = NAN;
-float humidity = NAN;
-bool rtcAvailable = false;
-unsigned long lastWiFiReconnect = 0;
-unsigned long lastRTCRetry = 0;
-
-// ตัวแปรสำหรับจัดการเวลา (ไม่ต้องใช้ delay)
+const byte PUMP_RELAY_INDEX = 0;
+const byte ZONE_COUNT = 4;
+const byte MAX_SCHEDULES = 12;
+const byte HISTORY_LIMIT = 12;
+const char* FIRMWARE_VERSION = "SmartFarm Pro 8.0.0";
 const unsigned int DEFAULT_PUMP_DURATION_MINUTES = 15;
 const unsigned int MIN_PUMP_DURATION_MINUTES = 1;
 const unsigned int MAX_PUMP_DURATION_MINUTES = 120;
+const unsigned long HEARTBEAT_INTERVAL = 30000;
+const unsigned long RTC_INTERVAL = 1000;
+const unsigned long DHT_INTERVAL = 2000;
+const unsigned long MQTT_RECONNECT_INTERVAL = 5000;
+const unsigned long WIFI_RECONNECT_INTERVAL = 10000;
+const unsigned long RTC_RETRY_INTERVAL = 10000;
+const unsigned int MQTT_MESSAGE_BUFFER_SIZE = 180;
 
-unsigned long lastHeartbeat = 0;
-unsigned long lastRTCUpdate = 0;
-unsigned long lastDHTRead = 0;
-unsigned long lastMQTTReconnect = 0;
-unsigned long pumpCountdownStartedAt = 0;
-unsigned long lastPumpCountdownTick = 0;
-unsigned long pumpCountdownDurationSeconds = DEFAULT_PUMP_DURATION_MINUTES * 60UL;
-unsigned long pumpCountdownRemainingSeconds = 0;
-bool pumpCountdownActive = false;
-const unsigned long HEARTBEAT_INTERVAL = 30000; // 30 วินาที
-const unsigned long RTC_INTERVAL = 1000;        // 1 วินาที
-const unsigned long DHT_INTERVAL = 2000;        // 2 วินาที
-const unsigned long MQTT_RECONNECT_INTERVAL = 5000; // 5 วินาที
-const unsigned long WIFI_RECONNECT_INTERVAL = 10000; // 10 วินาที
-const unsigned long RTC_RETRY_INTERVAL = 10000;  // 10 วินาที
-const unsigned int MQTT_MESSAGE_BUFFER_SIZE = 32;
+struct ScheduleData { char onTime1[6]; char offTime1[6]; char onTime2[6]; char offTime2[6]; };
+enum OperatingMode { MODE_AUTO, MODE_MANUAL, MODE_COUNTDOWN };
+struct ZoneConfig { char name[18]; byte relayIndex; bool enabled; unsigned int countdownMinutes; unsigned long runtimeToday; unsigned int activationCount; };
+struct ProSchedule { bool enabled; byte zone; char startTime[6]; unsigned int durationMinutes; byte repeatDays; int lastStartDay; };
+struct SmartFarmConfig { uint32_t magic; ScheduleData legacy; ZoneConfig zones[ZONE_COUNT]; ProSchedule schedules[MAX_SCHEDULES]; };
 
-void publishSensorData();
-void publishScheduleStatus();
-void publishPumpStatus();
-void publishPumpCountdown();
-void startPumpCountdown(unsigned int durationMinutes);
-void stopPumpCountdown(bool turnPumpOff);
-void updatePumpCountdown();
-void checkRTC();
-
-// ==========================================
-// ออบเจ็กต์ต่างๆ
-// ==========================================
 RTC_DS3231 rtc;
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
 DHT dht(DHT_PIN, DHTTYPE);
 
-const int RELAY_STATE_EEPROM_ADDR = sizeof(ScheduleData);
-const int EEPROM_SIZE = sizeof(ScheduleData) + RELAY_COUNT;
+ScheduleData schedules;
+SmartFarmConfig farmConfig;
+OperatingMode currentMode = MODE_AUTO;
+bool isAutoMode = true;
+bool relayStates[RELAY_COUNT] = {false, false, false, false};
+bool zoneStates[ZONE_COUNT] = {false, false, false, false};
+bool scheduleActive[MAX_SCHEDULES] = {false};
+unsigned long scheduleFinishAt[MAX_SCHEDULES] = {0};
+float temperature = NAN, humidity = NAN;
+bool rtcAvailable = false;
+unsigned long lastWiFiReconnect = 0, lastRTCRetry = 0, lastHeartbeat = 0, lastRTCUpdate = 0, lastDHTRead = 0, lastMQTTReconnect = 0;
+unsigned long pumpCountdownStartedAt = 0, lastPumpCountdownTick = 0, pumpCountdownDurationSeconds = DEFAULT_PUMP_DURATION_MINUTES * 60UL, pumpCountdownRemainingSeconds = 0;
+bool pumpCountdownActive = false;
+byte countdownZoneMask = 0x01;
+unsigned long pumpOnMillis = 0, pumpRuntimeTodaySeconds = 0;
+char lastScheduleAction[6] = "";
+char history[HISTORY_LIMIT][48]; byte historyHead = 0;
+const uint32_t CONFIG_MAGIC = 0x53465038UL;
+const int RELAY_STATE_EEPROM_ADDR = sizeof(SmartFarmConfig);
+const int EEPROM_SIZE = sizeof(SmartFarmConfig) + RELAY_COUNT + 16;
 
-// ==========================================
-// ฟังก์ชันอ่าน/เขียน EEPROM
-// ==========================================
-bool isValidScheduleTime(const char* value) {
-  if (strlen(value) != 5 || value[2] != ':') return false;
-  if (!isDigit(value[0]) || !isDigit(value[1]) || !isDigit(value[3]) || !isDigit(value[4])) return false;
+bool isDigitChar(char c) { return c >= '0' && c <= '9'; }
+bool isValidScheduleTime(const char* v) { if (strlen(v) != 5 || v[2] != ':') return false; if (!isDigitChar(v[0]) || !isDigitChar(v[1]) || !isDigitChar(v[3]) || !isDigitChar(v[4])) return false; byte h=(v[0]-'0')*10+v[1]-'0', m=(v[3]-'0')*10+v[4]-'0'; return h < 24 && m < 60; }
+bool isValidScheduleData(const ScheduleData& d) { return isValidScheduleTime(d.onTime1)&&isValidScheduleTime(d.offTime1)&&isValidScheduleTime(d.onTime2)&&isValidScheduleTime(d.offTime2); }
+void setDefaultSchedule(){ strcpy(schedules.onTime1,"06:00"); strcpy(schedules.offTime1,"06:10"); strcpy(schedules.onTime2,"17:00"); strcpy(schedules.offTime2,"17:10"); }
+const char* modeToText(){ return currentMode==MODE_AUTO?"AUTO":(currentMode==MODE_COUNTDOWN?"COUNTDOWN":"MANUAL"); }
+void addHistory(const char* e){ snprintf(history[historyHead], sizeof(history[historyHead]), "%lu:%s", millis()/1000UL, e); historyHead=(historyHead+1)%HISTORY_LIMIT; }
 
-  byte hour = ((value[0] - '0') * 10) + (value[1] - '0');
-  byte minute = ((value[3] - '0') * 10) + (value[4] - '0');
-  return hour <= 23 && minute <= 59;
+void writeRelayPin(byte i){ if(i>=RELAY_COUNT)return; bool level=RELAY_ACTIVE_LOW ? !relayStates[i] : relayStates[i]; digitalWrite(RELAY_PINS[i], level?HIGH:LOW); }
+void publishPumpStatus(); void publishPumpCountdown(); void publishSensorData(); void publishMode(); void publishScheduleStatus();
+void saveConfigToEEPROM(){ EEPROM.begin(EEPROM_SIZE); EEPROM.put(0,farmConfig); EEPROM.commit(); EEPROM.end(); }
+void setDefaultConfig(){ memset(&farmConfig,0,sizeof(farmConfig)); farmConfig.magic=CONFIG_MAGIC; setDefaultSchedule(); farmConfig.legacy=schedules; const char* n[ZONE_COUNT]={"Greenhouse","Vegetables","Garden","Field"}; for(byte i=0;i<ZONE_COUNT;i++){ strncpy(farmConfig.zones[i].name,n[i],sizeof(farmConfig.zones[i].name)-1); farmConfig.zones[i].relayIndex=i; farmConfig.zones[i].enabled=true; farmConfig.zones[i].countdownMinutes=DEFAULT_PUMP_DURATION_MINUTES; } farmConfig.schedules[0]={true,0,"06:00",10,0x7F,-1}; farmConfig.schedules[1]={true,0,"12:00",5,0x7F,-1}; farmConfig.schedules[2]={true,0,"18:30",15,0x7F,-1}; }
+void loadScheduleFromEEPROM(){ EEPROM.begin(EEPROM_SIZE); EEPROM.get(0,farmConfig); EEPROM.end(); if(farmConfig.magic!=CONFIG_MAGIC || !isValidScheduleData(farmConfig.legacy)){ setDefaultConfig(); saveConfigToEEPROM(); Serial.println("Initialized SmartFarm Pro config"); } schedules=farmConfig.legacy; }
+void saveScheduleToEEPROM(){ farmConfig.legacy=schedules; saveConfigToEEPROM(); Serial.println("Saved Schedule to EEPROM"); }
+void loadRelayStatesFromEEPROM(){ EEPROM.begin(EEPROM_SIZE); for(byte i=0;i<RELAY_COUNT;i++) relayStates[i]=EEPROM.read(RELAY_STATE_EEPROM_ADDR+i)==1; EEPROM.end(); }
+void saveRelayStateToEEPROM(byte i){ if(i>=RELAY_COUNT)return; EEPROM.begin(EEPROM_SIZE); EEPROM.write(RELAY_STATE_EEPROM_ADDR+i, relayStates[i]?1:0); EEPROM.commit(); EEPROM.end(); }
+
+void publishZoneStatus(byte z){ if(!client.connected()||z>=ZONE_COUNT)return; char t[32]; snprintf(t,sizeof(t),"farm/zone%d/status",z+1); client.publish(t, zoneStates[z]?"ON":"OFF", true); }
+void publishAllZoneStatus(){ for(byte i=0;i<ZONE_COUNT;i++) publishZoneStatus(i); }
+void publishZoneConfig(){ if(!client.connected())return; char j[360]; snprintf(j,sizeof(j),"{\"z1\":\"%s\",\"z2\":\"%s\",\"z3\":\"%s\",\"z4\":\"%s\"}",farmConfig.zones[0].name,farmConfig.zones[1].name,farmConfig.zones[2].name,farmConfig.zones[3].name); client.publish("farm/zones/config",j,true); }
+void publishRelayStatus(byte i){ if(i>=RELAY_COUNT)return; char t[32]; snprintf(t,sizeof(t),"farm/relay/%d/status",i+1); client.publish(t, relayStates[i]?"ON":"OFF",true); if(i==PUMP_RELAY_INDEX){ publishPumpStatus(); client.publish(topic_status, relayStates[i]?"ON":"OFF",true);} }
+void publishAllRelayStatus(){ for(byte i=0;i<RELAY_COUNT;i++) publishRelayStatus(i); }
+void setRelay(byte i,bool st){ if(i>=RELAY_COUNT || relayStates[i]==st)return; relayStates[i]=st; writeRelayPin(i); saveRelayStateToEEPROM(i); if(i==PUMP_RELAY_INDEX){ if(st) pumpOnMillis=millis(); else if(pumpOnMillis) { pumpRuntimeTodaySeconds+=(millis()-pumpOnMillis)/1000UL; pumpOnMillis=0; } addHistory(st?"Pump ON":"Pump OFF"); } publishRelayStatus(i); publishSensorData(); }
+void recomputePump(){ bool any=false; for(byte i=0;i<ZONE_COUNT;i++) if(zoneStates[i]) any=true; setRelay(PUMP_RELAY_INDEX, any); }
+void setZone(byte z,bool st){ if(z>=ZONE_COUNT || !farmConfig.zones[z].enabled)return; if(zoneStates[z]==st)return; zoneStates[z]=st; byte r=farmConfig.zones[z].relayIndex; if(r<RELAY_COUNT && r!=PUMP_RELAY_INDEX) setRelay(r,st); if(st){ farmConfig.zones[z].activationCount++; addHistory("Zone Started"); } else addHistory("Zone Finished"); publishZoneStatus(z); recomputePump(); }
+void allZonesOff(){ for(byte i=0;i<ZONE_COUNT;i++) setZone(i,false); recomputePump(); }
+
+void formatCountdown(unsigned long s,char* b,size_t n){ snprintf(b,n,"%02u:%02u",(unsigned int)(s/60UL),(unsigned int)(s%60UL)); }
+void publishPumpStatus(){ if(client.connected()) client.publish(topic_pump_status, relayStates[PUMP_RELAY_INDEX]?"ON":"OFF", true); }
+void publishPumpCountdown(){ if(!client.connected())return; char b[8]; formatCountdown(pumpCountdownRemainingSeconds,b,sizeof(b)); client.publish(topic_pump_countdown,b,true); }
+void startPumpCountdown(unsigned int min){ if(currentMode!=MODE_COUNTDOWN){ Serial.println("Ignored: countdown only runs in COUNTDOWN mode"); return; } if(min<MIN_PUMP_DURATION_MINUTES)min=MIN_PUMP_DURATION_MINUTES; if(min>MAX_PUMP_DURATION_MINUTES)min=MAX_PUMP_DURATION_MINUTES; pumpCountdownDurationSeconds=min*60UL; pumpCountdownRemainingSeconds=pumpCountdownDurationSeconds; pumpCountdownStartedAt=lastPumpCountdownTick=millis(); pumpCountdownActive=true; for(byte i=0;i<ZONE_COUNT;i++) if(countdownZoneMask&(1<<i)) setZone(i,true); setRelay(PUMP_RELAY_INDEX,true); publishPumpCountdown(); publishPumpStatus(); addHistory("Countdown Started"); }
+void stopPumpCountdown(bool off){ pumpCountdownActive=false; pumpCountdownRemainingSeconds=0; if(off) allZonesOff(); publishPumpCountdown(); publishPumpStatus(); addHistory("Countdown Finished"); }
+void updatePumpCountdown(){ if(!pumpCountdownActive)return; unsigned long now=millis(), elapsed=(now-pumpCountdownStartedAt)/1000UL; unsigned long rem=elapsed>=pumpCountdownDurationSeconds?0:pumpCountdownDurationSeconds-elapsed; if(now-lastPumpCountdownTick>=1000UL || rem!=pumpCountdownRemainingSeconds){ lastPumpCountdownTick=now; pumpCountdownRemainingSeconds=rem; publishPumpCountdown(); if(rem==0) stopPumpCountdown(true); } }
+
+void publishTime(){ if(!rtcAvailable||!client.connected())return; DateTime n=rtc.now(); char t[20]; sprintf(t,"%02d:%02d:%02d",n.hour(),n.minute(),n.second()); client.publish(topic_time,t,true); }
+void publishHeartbeat(){ client.publish(topic_status,"ONLINE",true); }
+void publishMode(){ if(client.connected()) client.publish(topic_mode,modeToText(),true); }
+void publishScheduleStatus(){ if(!client.connected())return; char b[420]; int o=snprintf(b,sizeof(b),"legacy=%s,%s,%s,%s;",schedules.onTime1,schedules.offTime1,schedules.onTime2,schedules.offTime2); for(byte i=0;i<MAX_SCHEDULES&&o<(int)sizeof(b)-28;i++) if(farmConfig.schedules[i].enabled) o+=snprintf(b+o,sizeof(b)-o,"%u,%s,%u,%u|",farmConfig.schedules[i].zone+1,farmConfig.schedules[i].startTime,farmConfig.schedules[i].durationMinutes,farmConfig.schedules[i].repeatDays); client.publish(topic_schedule_status,b,true); }
+void publishSensorData(){ if(!client.connected())return; if(!isnan(temperature)){ char tb[12]; dtostrf(temperature,4,1,tb); client.publish(topic_temperature,tb,true);} if(!isnan(humidity)){ char hb[12]; dtostrf(humidity,4,1,hb); client.publish(topic_humidity,hb,true);} char j[260]; snprintf(j,sizeof(j),"{\"temperature\":%.1f,\"humidity\":%.1f,\"pump\":\"%s\",\"zone1\":\"%s\",\"zone2\":\"%s\",\"zone3\":\"%s\",\"zone4\":\"%s\",\"mode\":\"%s\",\"runtimeToday\":%lu}",temperature,humidity,relayStates[0]?"ON":"OFF",zoneStates[0]?"ON":"OFF",zoneStates[1]?"ON":"OFF",zoneStates[2]?"ON":"OFF",zoneStates[3]?"ON":"OFF",modeToText(),pumpRuntimeTodaySeconds); client.publish(topic_sensor_data,j,true); }
+void readDHTSensor(){ float h=dht.readHumidity(), t=dht.readTemperature(); if(isnan(h)||isnan(t)){ Serial.println("WARNING: Failed to read DHT11"); return;} humidity=h; temperature=t; publishSensorData(); }
+void checkRTC(){ if(rtcAvailable)return; unsigned long now=millis(); if(now-lastRTCRetry<RTC_RETRY_INTERVAL)return; lastRTCRetry=now; rtcAvailable=rtc.begin(); if(rtcAvailable && rtc.lostPower()) rtc.adjust(DateTime(F(__DATE__),F(__TIME__))); }
+
+bool copyTrimmedPayload(char* d,size_t n,const byte* p,unsigned int l){ if(n==0||l>=n)return false; memcpy(d,p,l); d[l]='\0'; char* s=d; while(*s&&isspace((unsigned char)*s))s++; char* e=s+strlen(s); while(e>s&&isspace((unsigned char)*(e-1)))e--; *e='\0'; if(s!=d) memmove(d,s,e-s+1); return true; }
+bool copyScheduleToken(char* d,size_t n,const char* s,size_t l){ while(l&&isspace((unsigned char)*s)){s++;l--;} while(l&&isspace((unsigned char)s[l-1]))l--; if(l!=5||n<6)return false; memcpy(d,s,l); d[l]='\0'; return isValidScheduleTime(d); }
+bool parseScheduleMessage(const char* m,ScheduleData& ps){ const char* a=strchr(m,','); if(!a)return false; const char* b=strchr(a+1,','); if(!b)return false; const char* c=strchr(b+1,','); if(!c||strchr(c+1,','))return false; return copyScheduleToken(ps.onTime1,6,m,a-m)&&copyScheduleToken(ps.offTime1,6,a+1,b-a-1)&&copyScheduleToken(ps.onTime2,6,b+1,c-b-1)&&copyScheduleToken(ps.offTime2,6,c+1,strlen(c+1)); }
+
+void setMode(OperatingMode m){ if(currentMode==m)return; if(currentMode==MODE_COUNTDOWN) stopPumpCountdown(true); if(m==MODE_MANUAL) { pumpCountdownActive=false; allZonesOff(); } currentMode=m; isAutoMode=(m==MODE_AUTO); publishMode(); addHistory(modeToText()); }
+void handleZoneTopic(char* topic,const char* msg){ int z=topic[9]-'1'; if(z<0||z>=ZONE_COUNT)return; if(strstr(topic,"/name/set")){ strncpy(farmConfig.zones[z].name,msg,sizeof(farmConfig.zones[z].name)-1); farmConfig.zones[z].name[sizeof(farmConfig.zones[z].name)-1]='\0'; saveConfigToEEPROM(); publishZoneConfig(); return; } if(strstr(topic,"/enable/set")){ farmConfig.zones[z].enabled=strcmp(msg,"OFF")!=0; saveConfigToEEPROM(); publishZoneConfig(); return; } if(strstr(topic,"/set") && currentMode==MODE_MANUAL){ if(strcmp(msg,"ON")==0)setZone(z,true); else if(strcmp(msg,"OFF")==0)setZone(z,false); } }
+
+void mqttCallback(char* topic, byte* payload, unsigned int length){ char msg[MQTT_MESSAGE_BUFFER_SIZE]; if(!copyTrimmedPayload(msg,sizeof(msg),payload,length)){ Serial.println("Ignored: MQTT payload too long"); return; } Serial.print(topic); Serial.print(" => "); Serial.println(msg);
+  if(strncmp(topic,"farm/zone",9)==0){ handleZoneTopic(topic,msg); return; }
+  if(strcmp(topic,topic_pump)==0){ if(currentMode==MODE_MANUAL){ if(strcmp(msg,"ON")==0)setRelay(PUMP_RELAY_INDEX,true); else if(strcmp(msg,"OFF")==0)setRelay(PUMP_RELAY_INDEX,false); } else Serial.println("Ignored pump manual command outside MANUAL"); }
+  else if(strncmp(topic,topic_relay_set_prefix,strlen(topic_relay_set_prefix))==0){ if(currentMode!=MODE_MANUAL){ Serial.println("Ignored relay manual command outside MANUAL"); return;} size_t tl=strlen(topic), pl=strlen(topic_relay_set_prefix), sl=strlen(topic_relay_set_suffix); if(tl>pl+sl && strcmp(topic+tl-sl,topic_relay_set_suffix)==0){ int rn=atoi(topic+pl); if(rn>=1&&rn<=RELAY_COUNT){ if(strcmp(msg,"ON")==0)setRelay(rn-1,true); else if(strcmp(msg,"OFF")==0)setRelay(rn-1,false); } } }
+  else if(strcmp(topic,topic_pump_duration)==0){ int m=atoi(msg); if(m>=1&&m<=120) pumpCountdownDurationSeconds=m*60UL; }
+  else if(strcmp(topic,"farm/countdown/zones")==0){ byte mask=0; for(unsigned int i=0;i<strlen(msg);i++) if(msg[i]>='1'&&msg[i]<='4') mask|=1<<(msg[i]-'1'); if(mask) countdownZoneMask=mask; }
+  else if(strcmp(topic,topic_pump_countdown_start)==0){ if(currentMode!=MODE_COUNTDOWN) setMode(MODE_COUNTDOWN); int m=atoi(msg); startPumpCountdown(m?m:pumpCountdownDurationSeconds/60UL); }
+  else if(strcmp(topic,topic_pump_countdown_stop)==0) stopPumpCountdown(true);
+  else if(strcmp(topic,topic_mode)==0){ if(strcmp(msg,"AUTO")==0)setMode(MODE_AUTO); else if(strcmp(msg,"MANUAL")==0)setMode(MODE_MANUAL); else if(strcmp(msg,"COUNTDOWN")==0)setMode(MODE_COUNTDOWN); }
+  else if(strcmp(topic,topic_schedule)==0){ ScheduleData ps; if(parseScheduleMessage(msg,ps)){ schedules=ps; farmConfig.legacy=ps; saveConfigToEEPROM(); publishScheduleStatus(); } }
 }
 
-bool isValidScheduleData(const ScheduleData& data) {
-  return isValidScheduleTime(data.onTime1) && isValidScheduleTime(data.offTime1) &&
-         isValidScheduleTime(data.onTime2) && isValidScheduleTime(data.offTime2);
-}
+void connectMQTT(){ if(client.connected())return; unsigned long now=millis(); if(now-lastMQTTReconnect<MQTT_RECONNECT_INTERVAL)return; lastMQTTReconnect=now; if(client.connect("ESP8266FarmPro",mqtt_user,mqtt_pass,topic_status,0,true,"OFFLINE")){ client.subscribe(topic_pump); client.subscribe(topic_mode); client.subscribe(topic_schedule); client.subscribe(topic_pump_duration); client.subscribe(topic_pump_countdown_start); client.subscribe(topic_pump_countdown_stop); client.subscribe("farm/countdown/zones"); for(byte i=0;i<RELAY_COUNT;i++){ char t[32]; snprintf(t,sizeof(t),"farm/relay/%d/set",i+1); client.subscribe(t);} for(byte i=0;i<ZONE_COUNT;i++){ char t[36]; snprintf(t,sizeof(t),"farm/zone%d/#",i+1); client.subscribe(t);} publishAllRelayStatus(); publishAllZoneStatus(); publishMode(); publishScheduleStatus(); publishZoneConfig(); publishSensorData(); publishPumpCountdown(); client.publish("farm/firmware/version",FIRMWARE_VERSION,true); } else { Serial.print("MQTT failed rc="); Serial.println(client.state()); } }
 
-void setDefaultSchedule() {
-  strcpy(schedules.onTime1, "06:00");
-  strcpy(schedules.offTime1, "06:10");
-  strcpy(schedules.onTime2, "17:00");
-  strcpy(schedules.offTime2, "17:10");
-}
+void startSchedule(byte i){ if(i>=MAX_SCHEDULES)return; ProSchedule &s=farmConfig.schedules[i]; if(!s.enabled||s.zone>=ZONE_COUNT||!farmConfig.zones[s.zone].enabled)return; scheduleActive[i]=true; scheduleFinishAt[i]=millis()+s.durationMinutes*60000UL; setZone(s.zone,true); addHistory("Schedule Started"); }
+void checkSchedule(){ if(currentMode!=MODE_AUTO||!rtcAvailable)return; DateTime n=rtc.now(); char cur[6]; sprintf(cur,"%02d:%02d",n.hour(),n.minute()); byte dow=n.dayOfTheWeek(); for(byte i=0;i<MAX_SCHEDULES;i++){ ProSchedule &s=farmConfig.schedules[i]; if(s.enabled && strcmp(cur,s.startTime)==0 && s.lastStartDay!=n.day() && (s.repeatDays&(1<<dow))){ s.lastStartDay=n.day(); startSchedule(i); } if(scheduleActive[i] && (long)(millis()-scheduleFinishAt[i])>=0){ scheduleActive[i]=false; bool zoneStillNeeded=false; for(byte j=0;j<MAX_SCHEDULES;j++) if(scheduleActive[j]&&farmConfig.schedules[j].zone==s.zone) zoneStillNeeded=true; if(!zoneStillNeeded) setZone(s.zone,false); addHistory("Schedule Finished"); } } }
 
-void loadScheduleFromEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  EEPROM.get(0, schedules);
-
-  // ตรวจสอบข้อมูลขยะ ถ้าใช่ให้ตั้งค่าเริ่มต้น
-  if (!isValidScheduleData(schedules)) {
-    setDefaultSchedule();
-    EEPROM.put(0, schedules);
-    EEPROM.commit();
-    Serial.println("Initialized Default Schedule in EEPROM");
-  } else {
-    Serial.println("Loaded Schedule from EEPROM");
-  }
-  EEPROM.end();
-}
-
-void saveScheduleToEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  EEPROM.put(0, schedules);
-  EEPROM.commit();
-  EEPROM.end();
-  Serial.println("Saved Schedule to EEPROM");
-}
-
-
-void loadRelayStatesFromEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  for (byte i = 0; i < RELAY_COUNT; i++) {
-    byte savedState = EEPROM.read(RELAY_STATE_EEPROM_ADDR + i);
-    relayStates[i] = savedState == 1;
-  }
-  EEPROM.end();
-  Serial.println("Loaded Relay States from EEPROM");
-}
-
-void saveRelayStateToEEPROM(byte relayIndex) {
-  if (relayIndex >= RELAY_COUNT) return;
-
-  EEPROM.begin(EEPROM_SIZE);
-  EEPROM.write(RELAY_STATE_EEPROM_ADDR + relayIndex, relayStates[relayIndex] ? 1 : 0);
-  EEPROM.commit();
-  EEPROM.end();
-}
-
-void writeRelayPin(byte relayIndex) {
-  if (relayIndex >= RELAY_COUNT) return;
-
-  bool outputLevel = RELAY_ACTIVE_LOW ? !relayStates[relayIndex] : relayStates[relayIndex];
-  digitalWrite(RELAY_PINS[relayIndex], outputLevel ? HIGH : LOW);
-}
-
-// ==========================================
-// ฟังก์ชันควบคุมรีเลย์
-// ==========================================
-void publishRelayStatus(byte relayIndex) {
-  if (relayIndex >= RELAY_COUNT) return;
-
-  char topicBuffer[32];
-  snprintf(topicBuffer, sizeof(topicBuffer), "farm/relay/%d/status", relayIndex + 1);
-  client.publish(topicBuffer, relayStates[relayIndex] ? "ON" : "OFF", true);
-
-  // ส่งสถานะปั๊มน้ำช่อง 1 ไปยัง topic เดิม เพื่อให้ dashboard รุ่นเก่ายังใช้งานได้
-  if (relayIndex == 0) {
-    publishPumpStatus();
-    client.publish(topic_status, relayStates[relayIndex] ? "ON" : "OFF", true);
-  }
-}
-
-void publishAllRelayStatus() {
-  for (byte i = 0; i < RELAY_COUNT; i++) {
-    publishRelayStatus(i);
-  }
-}
-
-void setRelay(byte relayIndex, bool state) {
-  if (relayIndex >= RELAY_COUNT) return;
-
-  // ป้องกันการเปิด/ปิดซ้ำ
-  if (relayStates[relayIndex] == state) return;
-
-  relayStates[relayIndex] = state;
-  writeRelayPin(relayIndex);
-  saveRelayStateToEEPROM(relayIndex);
-
-  Serial.print("Relay ");
-  Serial.print(relayIndex + 1);
-  Serial.print(" (");
-  Serial.print(RELAY_NAMES[relayIndex]);
-  Serial.print(")");
-  Serial.print(" turned ");
-  Serial.println(state ? "ON" : "OFF");
-
-  // ส่งสถานะไปยัง MQTT
-  publishRelayStatus(relayIndex);
-  publishSensorData();
-}
-
-void setPump(bool state) {
-  setRelay(0, state);
-  if (!state && pumpCountdownActive) {
-    stopPumpCountdown(false);
-  }
-}
-
-// ==========================================
-// ฟังก์ชัน Pump Countdown Timer
-// ==========================================
-void formatCountdown(unsigned long totalSeconds, char* buffer, size_t bufferSize) {
-  unsigned int minutes = totalSeconds / 60UL;
-  unsigned int seconds = totalSeconds % 60UL;
-  snprintf(buffer, bufferSize, "%02u:%02u", minutes, seconds);
-}
-
-void publishPumpStatus() {
-  if (!client.connected()) return;
-  client.publish(topic_pump_status, relayStates[0] ? "ON" : "OFF", true);
-}
-
-void publishPumpCountdown() {
-  if (!client.connected()) return;
-  char countdownBuffer[8];
-  formatCountdown(pumpCountdownRemainingSeconds, countdownBuffer, sizeof(countdownBuffer));
-  client.publish(topic_pump_countdown, countdownBuffer, true);
-}
-
-void startPumpCountdown(unsigned int durationMinutes) {
-  if (durationMinutes < MIN_PUMP_DURATION_MINUTES) durationMinutes = MIN_PUMP_DURATION_MINUTES;
-  if (durationMinutes > MAX_PUMP_DURATION_MINUTES) durationMinutes = MAX_PUMP_DURATION_MINUTES;
-
-  pumpCountdownDurationSeconds = durationMinutes * 60UL;
-  pumpCountdownRemainingSeconds = pumpCountdownDurationSeconds;
-  pumpCountdownStartedAt = millis();
-  lastPumpCountdownTick = pumpCountdownStartedAt;
-  pumpCountdownActive = true;
-
-  setRelay(0, true);
-  publishPumpStatus();
-  publishPumpCountdown();
-
-  Serial.print("Pump countdown started for ");
-  Serial.print(durationMinutes);
-  Serial.println(" minute(s)");
-}
-
-void stopPumpCountdown(bool turnPumpOff) {
-  pumpCountdownActive = false;
-  pumpCountdownRemainingSeconds = 0;
-
-  if (turnPumpOff) {
-    setRelay(0, false);
-  }
-
-  publishPumpCountdown();
-  publishPumpStatus();
-  Serial.println("Pump countdown stopped");
-}
-
-void updatePumpCountdown() {
-  if (!pumpCountdownActive) return;
-
-  unsigned long currentMillis = millis();
-  unsigned long elapsedSeconds = (currentMillis - pumpCountdownStartedAt) / 1000UL;
-  unsigned long newRemaining = elapsedSeconds >= pumpCountdownDurationSeconds ? 0 : pumpCountdownDurationSeconds - elapsedSeconds;
-
-  if (currentMillis - lastPumpCountdownTick >= 1000UL || newRemaining != pumpCountdownRemainingSeconds) {
-    lastPumpCountdownTick = currentMillis;
-    pumpCountdownRemainingSeconds = newRemaining;
-    publishPumpCountdown();
-
-    if (pumpCountdownRemainingSeconds == 0) {
-      pumpCountdownActive = false;
-      setRelay(0, false);
-      publishPumpStatus();
-      publishPumpCountdown();
-      Serial.println("Pump countdown finished: pump OFF");
-    }
-  }
-}
-
-// ==========================================
-// ฟังก์ชันส่งข้อมูลผ่าน MQTT (Publish)
-// ==========================================
-void checkRTC() {
-  if (rtcAvailable) return;
-
-  unsigned long currentMillis = millis();
-  if (currentMillis - lastRTCRetry < RTC_RETRY_INTERVAL) return;
-  lastRTCRetry = currentMillis;
-
-  rtcAvailable = rtc.begin();
-  if (rtcAvailable) {
-    Serial.println("RTC recovered");
-    if (rtc.lostPower()) {
-      Serial.println("RTC lost power, let's set the time!");
-      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    }
-  }
-}
-
-void publishTime() {
-  if (!rtcAvailable) return;
-
-  DateTime now = rtc.now();
-  char timeString[20];
-  sprintf(timeString, "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
-  client.publish(topic_time, timeString, true);
-}
-
-void publishHeartbeat() {
-  client.publish(topic_status, "ONLINE", true);
-  Serial.println("Heartbeat sent: ONLINE");
-}
-
-void publishMode() {
-  client.publish(topic_mode, isAutoMode ? "AUTO" : "MANUAL", true);
-}
-
-void publishScheduleStatus() {
-  char scheduleBuffer[24];
-  snprintf(scheduleBuffer, sizeof(scheduleBuffer), "%s,%s,%s,%s",
-           schedules.onTime1, schedules.offTime1, schedules.onTime2, schedules.offTime2);
-  client.publish(topic_schedule_status, scheduleBuffer, true);
-}
-
-void publishSensorData() {
-  if (!client.connected() || isnan(temperature) || isnan(humidity)) return;
-
-  char tempBuffer[12];
-  char humBuffer[12];
-  dtostrf(temperature, 4, 1, tempBuffer);
-  dtostrf(humidity, 4, 1, humBuffer);
-  client.publish(topic_temperature, tempBuffer, true);
-  client.publish(topic_humidity, humBuffer, true);
-
-  char jsonBuffer[180];
-  snprintf(jsonBuffer, sizeof(jsonBuffer),
-           "{\"temperature\":%.1f,\"humidity\":%.1f,\"pump\":\"%s\",\"zone1\":\"%s\",\"zone2\":\"%s\",\"pavilionLight\":\"%s\"}",
-           temperature, humidity,
-           relayStates[0] ? "ON" : "OFF",
-           relayStates[1] ? "ON" : "OFF",
-           relayStates[2] ? "ON" : "OFF",
-           relayStates[3] ? "ON" : "OFF");
-  client.publish(topic_sensor_data, jsonBuffer, true);
-}
-
-void readDHTSensor() {
-  float newHumidity = dht.readHumidity();
-  float newTemperature = dht.readTemperature();
-
-  if (isnan(newHumidity) || isnan(newTemperature)) {
-    Serial.println("WARNING: Failed to read from DHT11 sensor");
-    return;
-  }
-
-  humidity = newHumidity;
-  temperature = newTemperature;
-
-  Serial.print("DHT11 Temperature: ");
-  Serial.print(temperature);
-  Serial.print(" C, Humidity: ");
-  Serial.print(humidity);
-  Serial.println(" %");
-
-  publishSensorData();
-}
-
-// ==========================================
-// ฟังก์ชันรับข้อมูลจาก MQTT (Callback)
-// ==========================================
-bool copyTrimmedPayload(char* destination, size_t destinationSize, const byte* payload, unsigned int length) {
-  if (destinationSize == 0 || length >= destinationSize) return false;
-
-  memcpy(destination, payload, length);
-  destination[length] = '\0';
-
-  char* start = destination;
-  while (*start && isspace((unsigned char)*start)) start++;
-
-  char* end = start + strlen(start);
-  while (end > start && isspace((unsigned char)*(end - 1))) end--;
-  *end = '\0';
-
-  if (start != destination) memmove(destination, start, end - start + 1);
-  return true;
-}
-
-bool copyScheduleToken(char* destination, size_t destinationSize, const char* start, size_t length) {
-  while (length > 0 && isspace((unsigned char)*start)) {
-    start++;
-    length--;
-  }
-  while (length > 0 && isspace((unsigned char)start[length - 1])) {
-    length--;
-  }
-
-  if (length != 5 || destinationSize < 6) return false;
-  memcpy(destination, start, length);
-  destination[length] = '\0';
-  return isValidScheduleTime(destination);
-}
-
-bool parseScheduleMessage(const char* msg, ScheduleData& parsedSchedule) {
-  const char* firstComma = strchr(msg, ',');
-  if (!firstComma) return false;
-
-  const char* secondComma = strchr(firstComma + 1, ',');
-  if (!secondComma) return false;
-
-  const char* thirdComma = strchr(secondComma + 1, ',');
-  if (!thirdComma) return false;
-
-  if (strchr(thirdComma + 1, ',')) return false;
-
-  return copyScheduleToken(parsedSchedule.onTime1, sizeof(parsedSchedule.onTime1), msg, firstComma - msg) &&
-         copyScheduleToken(parsedSchedule.offTime1, sizeof(parsedSchedule.offTime1), firstComma + 1, secondComma - firstComma - 1) &&
-         copyScheduleToken(parsedSchedule.onTime2, sizeof(parsedSchedule.onTime2), secondComma + 1, thirdComma - secondComma - 1) &&
-         copyScheduleToken(parsedSchedule.offTime2, sizeof(parsedSchedule.offTime2), thirdComma + 1, strlen(thirdComma + 1));
-}
-
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  char msg[MQTT_MESSAGE_BUFFER_SIZE];
-  if (!copyTrimmedPayload(msg, sizeof(msg), payload, length)) {
-    Serial.println("Ignored: MQTT payload too long");
-    return;
-  }
-
-  Serial.println("=== MQTT Message Received ===");
-  Serial.print("Topic: "); Serial.println(topic);
-  Serial.print("Message: "); Serial.println(msg);
-
-  // 1. ควบคุมปั๊มน้ำช่อง 1 แบบ Manual (topic เดิม)
-  if (strcmp(topic, topic_pump) == 0) {
-    if (!isAutoMode) {
-      if (strcmp(msg, "ON") == 0) startPumpCountdown(pumpCountdownDurationSeconds / 60UL);
-      else if (strcmp(msg, "OFF") == 0) stopPumpCountdown(true);
-    } else {
-      Serial.println("Ignored: System is in AUTO mode");
-    }
-  }
-  // 1.1 ควบคุมรีเลย์ 4 ช่องแบบ Manual (farm/relay/1/set ... farm/relay/4/set)
-  else if (strncmp(topic, topic_relay_set_prefix, strlen(topic_relay_set_prefix)) == 0) {
-    size_t topicLength = strlen(topic);
-    size_t prefixLength = strlen(topic_relay_set_prefix);
-    size_t suffixLength = strlen(topic_relay_set_suffix);
-
-    if (topicLength > prefixLength + suffixLength &&
-        strcmp(topic + topicLength - suffixLength, topic_relay_set_suffix) == 0) {
-      if (!isAutoMode) {
-        char relayNumberBuffer[4];
-        size_t relayNumberLength = topicLength - prefixLength - suffixLength;
-        if (relayNumberLength == 0 || relayNumberLength >= sizeof(relayNumberBuffer)) {
-          Serial.println("Ignored: Invalid relay number");
-          return;
-        }
-        memcpy(relayNumberBuffer, topic + prefixLength, relayNumberLength);
-        relayNumberBuffer[relayNumberLength] = '\0';
-
-        int relayNumber = atoi(relayNumberBuffer);
-        if (relayNumber < 1 || relayNumber > RELAY_COUNT) {
-          Serial.println("Ignored: Invalid relay number");
-          return;
-        }
-
-        byte relayIndex = relayNumber - 1;
-        if (relayIndex == 0 && strcmp(msg, "ON") == 0) startPumpCountdown(pumpCountdownDurationSeconds / 60UL);
-        else if (relayIndex == 0 && strcmp(msg, "OFF") == 0) stopPumpCountdown(true);
-        else if (strcmp(msg, "ON") == 0) setRelay(relayIndex, true);
-        else if (strcmp(msg, "OFF") == 0) setRelay(relayIndex, false);
-      } else {
-        Serial.println("Ignored: System is in AUTO mode");
-      }
-    }
-  }
-  // 1.2 ตั้งเวลาและควบคุม Countdown Timer
-  else if (strcmp(topic, topic_pump_duration) == 0) {
-    int durationMinutes = atoi(msg);
-    if (durationMinutes >= MIN_PUMP_DURATION_MINUTES && durationMinutes <= MAX_PUMP_DURATION_MINUTES) {
-      pumpCountdownDurationSeconds = durationMinutes * 60UL;
-      Serial.println("Pump countdown duration updated");
-    } else {
-      Serial.println("Ignored: Pump duration must be 1-120 minutes");
-    }
-  }
-  else if (strcmp(topic, topic_pump_countdown_start) == 0) {
-    int durationMinutes = atoi(msg);
-    if (durationMinutes == 0) durationMinutes = pumpCountdownDurationSeconds / 60UL;
-    startPumpCountdown(durationMinutes);
-  }
-  else if (strcmp(topic, topic_pump_countdown_stop) == 0) {
-    stopPumpCountdown(true);
-  }
-  // 2. เปลี่ยนโหมด Auto/Manual
-  else if (strcmp(topic, topic_mode) == 0) {
-    if (strcmp(msg, "AUTO") == 0) {
-      isAutoMode = true;
-      Serial.println("Mode changed to AUTO");
-    } else if (strcmp(msg, "MANUAL") == 0) {
-      isAutoMode = false;
-      Serial.println("Mode changed to MANUAL");
-    }
-    publishMode();
-  }
-  // 3. ตั้งค่า Schedule (รูปแบบ: HH:MM,HH:MM,HH:MM,HH:MM)
-  else if (strcmp(topic, topic_schedule) == 0) {
-    ScheduleData parsedSchedule;
-    if (parseScheduleMessage(msg, parsedSchedule)) {
-      if (memcmp(&schedules, &parsedSchedule, sizeof(ScheduleData)) != 0) {
-        schedules = parsedSchedule;
-        saveScheduleToEEPROM();
-      }
-      publishScheduleStatus();
-      Serial.println("Schedule updated via MQTT");
-    } else {
-      Serial.println("Ignored: Invalid schedule format. Use HH:MM,HH:MM,HH:MM,HH:MM");
-      publishScheduleStatus();
-    }
-  }
-}
-
-// ==========================================
-// ฟังก์ชันเชื่อมต่อ MQTT
-// ==========================================
-void connectMQTT() {
-  if (client.connected()) return;
-
-  unsigned long currentMillis = millis();
-  if (currentMillis - lastMQTTReconnect >= MQTT_RECONNECT_INTERVAL) {
-    lastMQTTReconnect = currentMillis;
-
-    Serial.print("Connecting to MQTT...");
-    // กำหนด Last Will and Testament (LWT) สำหรับแจ้ง Offline
-    if (client.connect("ESP8266Farm", mqtt_user, mqtt_pass, topic_status, 0, true, "OFFLINE")) {
-      Serial.println("Connected!");
-
-      // สมัครรับข้อมูล Topics ที่ต้องการ
-      client.subscribe(topic_pump);
-      for (byte i = 0; i < RELAY_COUNT; i++) {
-        char relayTopic[32];
-        snprintf(relayTopic, sizeof(relayTopic), "farm/relay/%d/set", i + 1);
-        client.subscribe(relayTopic);
-      }
-      client.subscribe(topic_mode);
-      client.subscribe(topic_schedule);
-      client.subscribe(topic_pump_duration);
-      client.subscribe(topic_pump_countdown_start);
-      client.subscribe(topic_pump_countdown_stop);
-
-      // ส่งสถานะเริ่มต้น
-      publishAllRelayStatus();
-      publishMode();
-      publishScheduleStatus();
-      publishSensorData();
-      publishPumpStatus();
-      publishPumpCountdown();
-    } else {
-      Serial.print("Failed, rc=");
-      Serial.println(client.state());
-    }
-  }
-}
-
-// ==========================================
-// ฟังก์ชันตรวจสอบตารางเวลา (Schedule)
-// ==========================================
-void checkSchedule() {
-  if (!isAutoMode || !rtcAvailable) return;
-
-  DateTime now = rtc.now();
-  char buf[6];
-  sprintf(buf, "%02d:%02d", now.hour(), now.minute());
-  String currentTime = String(buf);
-
-  // Schedule 1 ON
-  if (currentTime == schedules.onTime1 && strcmp(lastScheduleAction, "S1ON") != 0) {
-    startPumpCountdown(pumpCountdownDurationSeconds / 60UL);
-    Serial.println("Auto: Schedule 1 ON");
-    strcpy(lastScheduleAction, "S1ON");
-  }
-  // Schedule 1 OFF
-  else if (currentTime == schedules.offTime1 && strcmp(lastScheduleAction, "S1OFF") != 0) {
-    stopPumpCountdown(true);
-    Serial.println("Auto: Schedule 1 OFF");
-    strcpy(lastScheduleAction, "S1OFF");
-  }
-  // Schedule 2 ON
-  else if (currentTime == schedules.onTime2 && strcmp(lastScheduleAction, "S2ON") != 0) {
-    startPumpCountdown(pumpCountdownDurationSeconds / 60UL);
-    Serial.println("Auto: Schedule 2 ON");
-    strcpy(lastScheduleAction, "S2ON");
-  }
-  // Schedule 2 OFF
-  else if (currentTime == schedules.offTime2 && strcmp(lastScheduleAction, "S2OFF") != 0) {
-    stopPumpCountdown(true);
-    Serial.println("Auto: Schedule 2 OFF");
-    strcpy(lastScheduleAction, "S2OFF");
-  }
-
-  // รีเซ็ตสถานะเมื่อผ่านไป 1 นาที (เพื่อรองรับวันถัดไป)
-  if (currentTime != schedules.onTime1 && currentTime != schedules.offTime1 &&
-      currentTime != schedules.onTime2 && currentTime != schedules.offTime2) {
-    lastScheduleAction[0] = '\0';
-  }
-}
-
-// ==========================================
-// Setup Function
-// ==========================================
-void setup() {
-  Serial.begin(115200);
-  Serial.println("\n===== SMART FARM SYSTEM STARTING =====");
-
-  // ตั้งค่า Relay (ปิดปั๊มเป็นค่าเริ่มต้น)
-  for (byte i = 0; i < RELAY_COUNT; i++) {
-    pinMode(RELAY_PINS[i], OUTPUT);
-    relayStates[i] = false;
-    writeRelayPin(i);
-  }
-
-  // โหลด Schedule และสถานะรีเลย์จาก EEPROM
-  loadScheduleFromEEPROM();
-  loadRelayStatesFromEEPROM();
-  for (byte i = 0; i < RELAY_COUNT; i++) {
-    writeRelayPin(i);
-  }
-
-  // ตั้งค่า WiFiManager (Auto Reconnect อยู่ในตัวแล้ว)
-  WiFiManager wm;
-  // รีเซ็ตค่า WiFi หากต้องการ (wm.resetSettings();)
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.persistent(false);
-  Serial.println("Connecting to WiFi...");
-  if (!wm.autoConnect("SmartFarm_Setup")) {
-    Serial.println("Failed to connect WiFi, restarting...");
-    ESP.restart();
-  }
-  Serial.println("WiFi Connected!");
-  Serial.print("IP Address: "); Serial.println(WiFi.localIP());
-
-  // ตั้งค่า RTC
-  Wire.begin(I2C_SDA, I2C_SCL);
-  rtcAvailable = rtc.begin();
-  if (!rtcAvailable) {
-    Serial.println("WARNING: RTC NOT FOUND!");
-  } else {
-    Serial.println("RTC OK");
-    if (rtc.lostPower()) {
-      Serial.println("RTC lost power, let's set the time!");
-      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    }
-  }
-
-  // ตั้งค่า DHT11
-  dht.begin();
-  Serial.println("DHT11 Initialized");
-
-  // ตั้งค่า MQTT
-  espClient.setInsecure(); // ไม่ตรวจสอบ Certificate
-  client.setServer(mqtt_server, mqtt_port);
-  client.setCallback(mqttCallback);
-
-  // เปิดใช้งาน Watchdog Timer
-  ESP.wdtEnable(WDTO_8S); // รีเซ็ตบอร์ดถ้าค้างเกิน 8 วินาที
-
-  Serial.println("System Initialized.");
-}
-
-// ==========================================
-// Loop Function
-// ==========================================
-void loop() {
-  // รีเซ็ต Watchdog Timer ทุกรอบ
-  ESP.wdtFeed();
-
-  // ตรวจสอบการเชื่อมต่อ WiFi (Auto Reconnect)
-  if (WiFi.status() != WL_CONNECTED) {
-    unsigned long currentMillis = millis();
-    if (currentMillis - lastWiFiReconnect >= WIFI_RECONNECT_INTERVAL) {
-      lastWiFiReconnect = currentMillis;
-      Serial.println("WiFi disconnected, reconnecting...");
-      WiFi.reconnect();
-    }
-    return; // ข้ามการทำงานส่วนอื่นไปก่อน
-  }
-
-  // จัดการ MQTT
-  if (!client.connected()) {
-    connectMQTT();
-  } else {
-    client.loop();
-  }
-
-  unsigned long currentMillis = millis();
-
-  // 1. ตรวจสอบเวลาทุก 1 วินาที (สำหรับส่งเวลาและเช็คตารางเวลา)
-  if (currentMillis - lastRTCUpdate >= RTC_INTERVAL) {
-    lastRTCUpdate = currentMillis;
-    checkRTC();
-    if (client.connected()) publishTime();
-    checkSchedule();
-  }
-
-  updatePumpCountdown();
-
-  // 2. อ่าน DHT11 ทุก 2 วินาทีแบบ Non-blocking
-  if (currentMillis - lastDHTRead >= DHT_INTERVAL) {
-    lastDHTRead = currentMillis;
-    readDHTSensor();
-  }
-
-  // 3. ส่ง Heartbeat ทุก 30 วินาที
-  if (currentMillis - lastHeartbeat >= HEARTBEAT_INTERVAL) {
-    lastHeartbeat = currentMillis;
-    if (client.connected()) publishHeartbeat();
-  }
-}
+void setup(){ Serial.begin(115200); Serial.println("\n===== SMART FARM PROFESSIONAL STARTING ====="); for(byte i=0;i<RELAY_COUNT;i++){ pinMode(RELAY_PINS[i],OUTPUT); relayStates[i]=false; writeRelayPin(i);} loadScheduleFromEEPROM(); loadRelayStatesFromEEPROM(); for(byte i=0;i<RELAY_COUNT;i++) writeRelayPin(i); WiFiManager wm; WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(true); WiFi.persistent(false); if(!wm.autoConnect("SmartFarm_Setup")) ESP.restart(); Wire.begin(I2C_SDA,I2C_SCL); rtcAvailable=rtc.begin(); if(rtcAvailable&&rtc.lostPower()) rtc.adjust(DateTime(F(__DATE__),F(__TIME__))); dht.begin(); espClient.setInsecure(); client.setServer(mqtt_server,mqtt_port); client.setCallback(mqttCallback); ESP.wdtEnable(WDTO_8S); }
+void loop(){ ESP.wdtFeed(); if(WiFi.status()!=WL_CONNECTED){ unsigned long now=millis(); if(now-lastWiFiReconnect>=WIFI_RECONNECT_INTERVAL){ lastWiFiReconnect=now; WiFi.reconnect(); } return; } if(!client.connected()) connectMQTT(); else client.loop(); unsigned long now=millis(); if(now-lastRTCUpdate>=RTC_INTERVAL){ lastRTCUpdate=now; checkRTC(); publishTime(); checkSchedule(); } updatePumpCountdown(); if(now-lastDHTRead>=DHT_INTERVAL){ lastDHTRead=now; readDHTSensor(); } if(now-lastHeartbeat>=HEARTBEAT_INTERVAL){ lastHeartbeat=now; if(client.connected()) publishHeartbeat(); } }
