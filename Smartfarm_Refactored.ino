@@ -19,6 +19,11 @@ const char* mqtt_pass = "Kla12345";
 
 // MQTT Topics
 const char* topic_pump     = "farm/pump"; // Legacy: relay 1
+const char* topic_pump_status = "farm/pump/status";
+const char* topic_pump_countdown = "farm/pump/countdown";
+const char* topic_pump_countdown_start = "farm/pump/countdown/start";
+const char* topic_pump_countdown_stop = "farm/pump/countdown/stop";
+const char* topic_pump_duration = "farm/pump/duration";
 const char* topic_status   = "farm/status";
 const char* topic_relay_set_prefix = "farm/relay/";
 const char* topic_relay_set_suffix = "/set";
@@ -67,10 +72,19 @@ unsigned long lastWiFiReconnect = 0;
 unsigned long lastRTCRetry = 0;
 
 // ตัวแปรสำหรับจัดการเวลา (ไม่ต้องใช้ delay)
+const unsigned int DEFAULT_PUMP_DURATION_MINUTES = 15;
+const unsigned int MIN_PUMP_DURATION_MINUTES = 1;
+const unsigned int MAX_PUMP_DURATION_MINUTES = 120;
+
 unsigned long lastHeartbeat = 0;
 unsigned long lastRTCUpdate = 0;
 unsigned long lastDHTRead = 0;
 unsigned long lastMQTTReconnect = 0;
+unsigned long pumpCountdownStartedAt = 0;
+unsigned long lastPumpCountdownTick = 0;
+unsigned long pumpCountdownDurationSeconds = DEFAULT_PUMP_DURATION_MINUTES * 60UL;
+unsigned long pumpCountdownRemainingSeconds = 0;
+bool pumpCountdownActive = false;
 const unsigned long HEARTBEAT_INTERVAL = 30000; // 30 วินาที
 const unsigned long RTC_INTERVAL = 1000;        // 1 วินาที
 const unsigned long DHT_INTERVAL = 2000;        // 2 วินาที
@@ -78,6 +92,15 @@ const unsigned long MQTT_RECONNECT_INTERVAL = 5000; // 5 วินาที
 const unsigned long WIFI_RECONNECT_INTERVAL = 10000; // 10 วินาที
 const unsigned long RTC_RETRY_INTERVAL = 10000;  // 10 วินาที
 const unsigned int MQTT_MESSAGE_BUFFER_SIZE = 32;
+
+void publishSensorData();
+void publishScheduleStatus();
+void publishPumpStatus();
+void publishPumpCountdown();
+void startPumpCountdown(unsigned int durationMinutes);
+void stopPumpCountdown(bool turnPumpOff);
+void updatePumpCountdown();
+void checkRTC();
 
 // ==========================================
 // ออบเจ็กต์ต่างๆ
@@ -89,10 +112,6 @@ DHT dht(DHT_PIN, DHTTYPE);
 
 const int RELAY_STATE_EEPROM_ADDR = sizeof(ScheduleData);
 const int EEPROM_SIZE = sizeof(ScheduleData) + RELAY_COUNT;
-
-void publishSensorData();
-void publishScheduleStatus();
-void checkRTC();
 
 // ==========================================
 // ฟังก์ชันอ่าน/เขียน EEPROM
@@ -181,6 +200,7 @@ void publishRelayStatus(byte relayIndex) {
 
   // ส่งสถานะปั๊มน้ำช่อง 1 ไปยัง topic เดิม เพื่อให้ dashboard รุ่นเก่ายังใช้งานได้
   if (relayIndex == 0) {
+    publishPumpStatus();
     client.publish(topic_status, relayStates[relayIndex] ? "ON" : "OFF", true);
   }
 }
@@ -216,6 +236,84 @@ void setRelay(byte relayIndex, bool state) {
 
 void setPump(bool state) {
   setRelay(0, state);
+  if (!state && pumpCountdownActive) {
+    stopPumpCountdown(false);
+  }
+}
+
+// ==========================================
+// ฟังก์ชัน Pump Countdown Timer
+// ==========================================
+void formatCountdown(unsigned long totalSeconds, char* buffer, size_t bufferSize) {
+  unsigned int minutes = totalSeconds / 60UL;
+  unsigned int seconds = totalSeconds % 60UL;
+  snprintf(buffer, bufferSize, "%02u:%02u", minutes, seconds);
+}
+
+void publishPumpStatus() {
+  if (!client.connected()) return;
+  client.publish(topic_pump_status, relayStates[0] ? "ON" : "OFF", true);
+}
+
+void publishPumpCountdown() {
+  if (!client.connected()) return;
+  char countdownBuffer[8];
+  formatCountdown(pumpCountdownRemainingSeconds, countdownBuffer, sizeof(countdownBuffer));
+  client.publish(topic_pump_countdown, countdownBuffer, true);
+}
+
+void startPumpCountdown(unsigned int durationMinutes) {
+  if (durationMinutes < MIN_PUMP_DURATION_MINUTES) durationMinutes = MIN_PUMP_DURATION_MINUTES;
+  if (durationMinutes > MAX_PUMP_DURATION_MINUTES) durationMinutes = MAX_PUMP_DURATION_MINUTES;
+
+  pumpCountdownDurationSeconds = durationMinutes * 60UL;
+  pumpCountdownRemainingSeconds = pumpCountdownDurationSeconds;
+  pumpCountdownStartedAt = millis();
+  lastPumpCountdownTick = pumpCountdownStartedAt;
+  pumpCountdownActive = true;
+
+  setRelay(0, true);
+  publishPumpStatus();
+  publishPumpCountdown();
+
+  Serial.print("Pump countdown started for ");
+  Serial.print(durationMinutes);
+  Serial.println(" minute(s)");
+}
+
+void stopPumpCountdown(bool turnPumpOff) {
+  pumpCountdownActive = false;
+  pumpCountdownRemainingSeconds = 0;
+
+  if (turnPumpOff) {
+    setRelay(0, false);
+  }
+
+  publishPumpCountdown();
+  publishPumpStatus();
+  Serial.println("Pump countdown stopped");
+}
+
+void updatePumpCountdown() {
+  if (!pumpCountdownActive) return;
+
+  unsigned long currentMillis = millis();
+  unsigned long elapsedSeconds = (currentMillis - pumpCountdownStartedAt) / 1000UL;
+  unsigned long newRemaining = elapsedSeconds >= pumpCountdownDurationSeconds ? 0 : pumpCountdownDurationSeconds - elapsedSeconds;
+
+  if (currentMillis - lastPumpCountdownTick >= 1000UL || newRemaining != pumpCountdownRemainingSeconds) {
+    lastPumpCountdownTick = currentMillis;
+    pumpCountdownRemainingSeconds = newRemaining;
+    publishPumpCountdown();
+
+    if (pumpCountdownRemainingSeconds == 0) {
+      pumpCountdownActive = false;
+      setRelay(0, false);
+      publishPumpStatus();
+      publishPumpCountdown();
+      Serial.println("Pump countdown finished: pump OFF");
+    }
+  }
 }
 
 // ==========================================
@@ -372,8 +470,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   // 1. ควบคุมปั๊มน้ำช่อง 1 แบบ Manual (topic เดิม)
   if (strcmp(topic, topic_pump) == 0) {
     if (!isAutoMode) {
-      if (strcmp(msg, "ON") == 0) setPump(true);
-      else if (strcmp(msg, "OFF") == 0) setPump(false);
+      if (strcmp(msg, "ON") == 0) startPumpCountdown(pumpCountdownDurationSeconds / 60UL);
+      else if (strcmp(msg, "OFF") == 0) stopPumpCountdown(true);
     } else {
       Serial.println("Ignored: System is in AUTO mode");
     }
@@ -403,12 +501,32 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         }
 
         byte relayIndex = relayNumber - 1;
-        if (strcmp(msg, "ON") == 0) setRelay(relayIndex, true);
+        if (relayIndex == 0 && strcmp(msg, "ON") == 0) startPumpCountdown(pumpCountdownDurationSeconds / 60UL);
+        else if (relayIndex == 0 && strcmp(msg, "OFF") == 0) stopPumpCountdown(true);
+        else if (strcmp(msg, "ON") == 0) setRelay(relayIndex, true);
         else if (strcmp(msg, "OFF") == 0) setRelay(relayIndex, false);
       } else {
         Serial.println("Ignored: System is in AUTO mode");
       }
     }
+  }
+  // 1.2 ตั้งเวลาและควบคุม Countdown Timer
+  else if (strcmp(topic, topic_pump_duration) == 0) {
+    int durationMinutes = atoi(msg);
+    if (durationMinutes >= MIN_PUMP_DURATION_MINUTES && durationMinutes <= MAX_PUMP_DURATION_MINUTES) {
+      pumpCountdownDurationSeconds = durationMinutes * 60UL;
+      Serial.println("Pump countdown duration updated");
+    } else {
+      Serial.println("Ignored: Pump duration must be 1-120 minutes");
+    }
+  }
+  else if (strcmp(topic, topic_pump_countdown_start) == 0) {
+    int durationMinutes = atoi(msg);
+    if (durationMinutes == 0) durationMinutes = pumpCountdownDurationSeconds / 60UL;
+    startPumpCountdown(durationMinutes);
+  }
+  else if (strcmp(topic, topic_pump_countdown_stop) == 0) {
+    stopPumpCountdown(true);
   }
   // 2. เปลี่ยนโหมด Auto/Manual
   else if (strcmp(topic, topic_mode) == 0) {
@@ -462,12 +580,17 @@ void connectMQTT() {
       }
       client.subscribe(topic_mode);
       client.subscribe(topic_schedule);
+      client.subscribe(topic_pump_duration);
+      client.subscribe(topic_pump_countdown_start);
+      client.subscribe(topic_pump_countdown_stop);
 
       // ส่งสถานะเริ่มต้น
       publishAllRelayStatus();
       publishMode();
       publishScheduleStatus();
       publishSensorData();
+      publishPumpStatus();
+      publishPumpCountdown();
     } else {
       Serial.print("Failed, rc=");
       Serial.println(client.state());
@@ -488,25 +611,25 @@ void checkSchedule() {
 
   // Schedule 1 ON
   if (currentTime == schedules.onTime1 && strcmp(lastScheduleAction, "S1ON") != 0) {
-    setPump(true);
+    startPumpCountdown(pumpCountdownDurationSeconds / 60UL);
     Serial.println("Auto: Schedule 1 ON");
     strcpy(lastScheduleAction, "S1ON");
   }
   // Schedule 1 OFF
   else if (currentTime == schedules.offTime1 && strcmp(lastScheduleAction, "S1OFF") != 0) {
-    setPump(false);
+    stopPumpCountdown(true);
     Serial.println("Auto: Schedule 1 OFF");
     strcpy(lastScheduleAction, "S1OFF");
   }
   // Schedule 2 ON
   else if (currentTime == schedules.onTime2 && strcmp(lastScheduleAction, "S2ON") != 0) {
-    setPump(true);
+    startPumpCountdown(pumpCountdownDurationSeconds / 60UL);
     Serial.println("Auto: Schedule 2 ON");
     strcpy(lastScheduleAction, "S2ON");
   }
   // Schedule 2 OFF
   else if (currentTime == schedules.offTime2 && strcmp(lastScheduleAction, "S2OFF") != 0) {
-    setPump(false);
+    stopPumpCountdown(true);
     Serial.println("Auto: Schedule 2 OFF");
     strcpy(lastScheduleAction, "S2OFF");
   }
@@ -548,7 +671,6 @@ void setup() {
   Serial.println("Connecting to WiFi...");
   if (!wm.autoConnect("SmartFarm_Setup")) {
     Serial.println("Failed to connect WiFi, restarting...");
-    delay(3000);
     ESP.restart();
   }
   Serial.println("WiFi Connected!");
@@ -616,6 +738,8 @@ void loop() {
     if (client.connected()) publishTime();
     checkSchedule();
   }
+
+  updatePumpCountdown();
 
   // 2. อ่าน DHT11 ทุก 2 วินาทีแบบ Non-blocking
   if (currentMillis - lastDHTRead >= DHT_INTERVAL) {

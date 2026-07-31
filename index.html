@@ -151,6 +151,27 @@
         }
         @keyframes slideUp { from { transform: translateX(-50%) translateY(100px); opacity: 0; } to { transform: translateX(-50%) translateY(0); opacity: 1; } }
 
+        .countdown-card {
+            background: radial-gradient(circle at top left, rgba(110, 231, 183, 0.35), transparent 32%), linear-gradient(135deg, #064e3b, #10b981);
+            color: white; overflow: hidden; position: relative;
+        }
+        .countdown-card::after { content: ""; position: absolute; width: 180px; height: 180px; right: -60px; top: -60px; background: rgba(255,255,255,0.12); border-radius: 50%; }
+        .countdown-status-row, .countdown-time-grid, .duration-control { display: flex; gap: 12px; align-items: center; justify-content: space-between; position: relative; z-index: 1; }
+        .pump-pill { padding: 8px 14px; border-radius: 999px; background: rgba(16,185,129,0.85); font-weight: 700; letter-spacing: 0.5px; }
+        .countdown-display { font-size: clamp(48px, 14vw, 88px); line-height: 1; font-weight: 800; text-align: center; margin: 18px 0; text-shadow: 0 8px 28px rgba(0,0,0,0.25); position: relative; z-index: 1; }
+        .progress-shell { width: 100%; height: 16px; background: rgba(255,255,255,0.22); border-radius: 999px; overflow: hidden; margin: 14px 0 18px; position: relative; z-index: 1; }
+        .progress-fill { width: 100%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #bbf7d0, #22c55e, #facc15); transition: width 0.7s ease; box-shadow: 0 0 22px rgba(187,247,208,0.8); }
+        .progress-fill.active { animation: pulseBar 1.4s ease-in-out infinite; }
+        @keyframes pulseBar { 50% { filter: brightness(1.25); } }
+        .countdown-time-box { flex: 1; background: rgba(255,255,255,0.14); padding: 12px; border-radius: 16px; text-align: center; }
+        .countdown-time-box .label { font-size: 12px; opacity: 0.8; }
+        .countdown-time-box .value { font-size: 16px; font-weight: 700; }
+        .duration-control { margin-top: 18px; }
+        .duration-btn { width: 48px; height: 48px; border: 0; border-radius: 16px; background: white; color: var(--primary-dark); font-size: 20px; font-weight: 800; cursor: pointer; }
+        .duration-value { flex: 1; text-align: center; font-weight: 800; font-size: 20px; }
+        .countdown-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; position: relative; z-index: 1; }
+        @media (max-width: 520px) { .countdown-time-grid, .countdown-actions { grid-template-columns: 1fr; display: grid; } }
+
         .hidden { display: none !important; }
     </style>
 </head>
@@ -212,6 +233,36 @@
                         <div class="label">เวลา</div>
                         <div class="value" id="rtcTime">--:--</div>
                     </div>
+                </div>
+            </div>
+
+            <!-- PUMP COUNTDOWN TIMER -->
+            <div class="card countdown-card">
+                <div class="section-title" style="color: white;"><i class="fas fa-stopwatch"></i> Pump Countdown Timer</div>
+                <div class="countdown-status-row">
+                    <span>🟢 Pump Status</span>
+                    <span class="pump-pill" id="countdownPumpStatus">OFF</span>
+                </div>
+                <div class="countdown-display" id="countdownRemaining">00:00</div>
+                <div class="progress-shell"><div class="progress-fill" id="countdownProgress"></div></div>
+                <div class="countdown-time-grid">
+                    <div class="countdown-time-box">
+                        <div class="label">Start Time</div>
+                        <div class="value" id="countdownStartTime">--:--:--</div>
+                    </div>
+                    <div class="countdown-time-box">
+                        <div class="label">Estimated Finish</div>
+                        <div class="value" id="countdownFinishTime">--:--:--</div>
+                    </div>
+                </div>
+                <div class="duration-control">
+                    <button class="duration-btn" onclick="changeCountdownDuration(-1)"><i class="fas fa-minus"></i></button>
+                    <div class="duration-value">Duration: <span id="countdownDuration">15</span> min</div>
+                    <button class="duration-btn" onclick="changeCountdownDuration(1)"><i class="fas fa-plus"></i></button>
+                </div>
+                <div class="countdown-actions">
+                    <button class="btn btn-primary" onclick="startCountdownTimer()" style="margin:0; background:#22c55e;"><i class="fas fa-play"></i> Start Countdown</button>
+                    <button class="btn btn-danger" onclick="stopCountdownTimer()" style="margin:0;"><i class="fas fa-stop"></i> Stop Countdown</button>
                 </div>
             </div>
 
@@ -373,6 +424,12 @@
         const relayLabels = ['ปั๊มน้ำ', 'โซน 1', 'โซน 2', 'ไฟศาลา'];
         const relayDataKeys = ['pump', 'zone1', 'zone2', 'pavilionLight'];
         const relayStates = Array(relayCount).fill('OFF');
+        let countdownDurationMinutes = 15;
+        let countdownTotalSeconds = countdownDurationMinutes * 60;
+        let countdownRemainingSeconds = 0;
+        let countdownRunning = false;
+        let countdownStartedAt = null;
+        let countdownFinishAt = null;
 
         // ==================== LOGGING ====================
         function addLog(message) {
@@ -507,7 +564,7 @@
                 document.getElementById('nodeStatus').style.color = '#10b981';
                 addLog('เชื่อมต่อ MQTT สำเร็จ');
 
-                mqttClient.subscribe(['farm/time', 'farm/soil', 'farm/light', 'farm/status', 'farm/mode', 'farm/temp', 'farm/hum', 'farm/data', 'farm/schedule/status', 'farm/relay/+/status']);
+                mqttClient.subscribe(['farm/time', 'farm/soil', 'farm/light', 'farm/status', 'farm/pump/status', 'farm/pump/countdown', 'farm/mode', 'farm/temp', 'farm/hum', 'farm/data', 'farm/schedule/status', 'farm/relay/+/status']);
             });
 
             mqttClient.on('message', (topic, message) => {
@@ -522,6 +579,13 @@
                 }
 
                 switch(topic) {
+                    case 'farm/pump/status':
+                        updateRelayState(1, msg === 'ON' ? 'ON' : 'OFF');
+                        updateCountdownPumpStatus(msg === 'ON' ? 'ON' : 'OFF');
+                        break;
+                    case 'farm/pump/countdown':
+                        updateCountdownFromMqtt(msg);
+                        break;
                     case 'farm/data':
                         updateFromFarmData(msg);
                         break;
@@ -614,7 +678,98 @@
             if (relayNumber === 1) {
                 document.getElementById('pumpStatus').textContent = state;
                 document.getElementById('pumpStatus').style.color = state === 'ON' ? '#ef4444' : '#10b981';
+                updateCountdownPumpStatus(state);
             }
+        }
+
+        function secondsToClock(totalSeconds) {
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = totalSeconds % 60;
+            return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        }
+
+        function clockToSeconds(clock) {
+            const match = /^(\d{1,3}):(\d{2})$/.exec(clock);
+            if (!match) return 0;
+            return Number(match[1]) * 60 + Number(match[2]);
+        }
+
+        function formatTime(date) {
+            return date ? date.toLocaleTimeString('th-TH') : '--:--:--';
+        }
+
+        function renderCountdownCard() {
+            document.getElementById('countdownDuration').textContent = countdownDurationMinutes;
+            document.getElementById('countdownRemaining').textContent = secondsToClock(countdownRemainingSeconds);
+            document.getElementById('countdownStartTime').textContent = formatTime(countdownStartedAt);
+            document.getElementById('countdownFinishTime').textContent = formatTime(countdownFinishAt);
+
+            const elapsed = countdownTotalSeconds > 0 ? Math.max(0, countdownTotalSeconds - countdownRemainingSeconds) : 0;
+            const percent = countdownRunning ? Math.min(100, Math.round((elapsed / countdownTotalSeconds) * 100)) : (countdownRemainingSeconds === 0 ? 100 : 0);
+            const bar = document.getElementById('countdownProgress');
+            bar.style.width = `${percent}%`;
+            bar.classList.toggle('active', countdownRunning);
+        }
+
+        function updateCountdownPumpStatus(status) {
+            const statusEl = document.getElementById('countdownPumpStatus');
+            statusEl.textContent = status;
+            statusEl.style.background = status === 'ON' ? 'rgba(239,68,68,0.85)' : 'rgba(16,185,129,0.85)';
+            if (status === 'OFF' && countdownRemainingSeconds === 0) countdownRunning = false;
+            renderCountdownCard();
+        }
+
+        function updateCountdownFromMqtt(value) {
+            countdownRemainingSeconds = clockToSeconds(value);
+            if (countdownRemainingSeconds >= countdownTotalSeconds) {
+                countdownTotalSeconds = Math.max(countdownRemainingSeconds, countdownDurationMinutes * 60);
+            }
+            countdownRunning = countdownRemainingSeconds > 0 && relayStates[0] === 'ON';
+            if (countdownRunning && !countdownStartedAt) {
+                countdownStartedAt = new Date();
+                countdownFinishAt = new Date(Date.now() + countdownRemainingSeconds * 1000);
+            }
+            if (countdownRemainingSeconds === 0) {
+                countdownRunning = false;
+                updateCountdownPumpStatus('OFF');
+            }
+            renderCountdownCard();
+        }
+
+        function publishCountdownDuration() {
+            if (mqttClient && mqttClient.connected) mqttClient.publish('farm/pump/duration', String(countdownDurationMinutes), { retain: true });
+        }
+
+        function changeCountdownDuration(delta) {
+            countdownDurationMinutes = Math.min(120, Math.max(1, countdownDurationMinutes + delta));
+            countdownTotalSeconds = countdownDurationMinutes * 60;
+            if (!countdownRunning) countdownRemainingSeconds = 0;
+            publishCountdownDuration();
+            renderCountdownCard();
+        }
+
+        function startCountdownTimer() {
+            if (!(mqttClient && mqttClient.connected)) return showToast('ไม่ได้เชื่อมต่อ MQTT');
+            countdownTotalSeconds = countdownDurationMinutes * 60;
+            countdownRemainingSeconds = countdownTotalSeconds;
+            countdownStartedAt = new Date();
+            countdownFinishAt = new Date(Date.now() + countdownTotalSeconds * 1000);
+            countdownRunning = true;
+            publishCountdownDuration();
+            mqttClient.publish('farm/pump/countdown/start', String(countdownDurationMinutes));
+            addLog(`เริ่มรดน้ำ ${countdownDurationMinutes} นาที`);
+            showToast('เริ่ม Countdown ปั๊มน้ำ');
+            renderCountdownCard();
+        }
+
+        function stopCountdownTimer() {
+            if (!(mqttClient && mqttClient.connected)) return showToast('ไม่ได้เชื่อมต่อ MQTT');
+            mqttClient.publish('farm/pump/countdown/stop', 'STOP');
+            countdownRemainingSeconds = 0;
+            countdownRunning = false;
+            updateCountdownPumpStatus('OFF');
+            addLog('หยุด Countdown ปั๊มน้ำ');
+            showToast('หยุด Countdown แล้ว');
         }
 
         function toggleRelay(relayNumber) {
@@ -818,6 +973,7 @@
             }
 
             renderRelayControls();
+            renderCountdownCard();
             renderSchedule('');
             renderUserList();
             renderLogs();
