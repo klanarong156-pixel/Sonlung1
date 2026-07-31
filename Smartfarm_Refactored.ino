@@ -699,7 +699,7 @@ void setup() {
   client.setCallback(mqttCallback);
 
   // เปิดใช้งาน Watchdog Timer
-  ESP.wdtEnable(WDTO_8S); // รีเซ็ตบอร์ดถ้าค้างเกิน 8 วินาที
+  ESP.wdtEnable(8000); // ESP8266 watchdog timeout in milliseconds (8 วินาที)
 
   Serial.println("System Initialized.");
 }
