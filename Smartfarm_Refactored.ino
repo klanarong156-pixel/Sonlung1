@@ -91,6 +91,7 @@ const unsigned long DHT_INTERVAL = 2000;        // 2 วินาที
 const unsigned long MQTT_RECONNECT_INTERVAL = 5000; // 5 วินาที
 const unsigned long WIFI_RECONNECT_INTERVAL = 10000; // 10 วินาที
 const unsigned long RTC_RETRY_INTERVAL = 10000;  // 10 วินาที
+const uint32_t WATCHDOG_TIMEOUT_MS = 8000UL; // 8 วินาที สำหรับ ESP8266 WDT
 const unsigned int MQTT_MESSAGE_BUFFER_SIZE = 32;
 
 void publishSensorData();
@@ -699,7 +700,7 @@ void setup() {
   client.setCallback(mqttCallback);
 
   // เปิดใช้งาน Watchdog Timer
-  ESP.wdtEnable(8000); // ESP8266 watchdog timeout in milliseconds (8 วินาที)
+  ESP.wdtEnable(WATCHDOG_TIMEOUT_MS); // รีเซ็ตบอร์ดถ้าค้างเกิน 8 วินาที
 
   Serial.println("System Initialized.");
 }
