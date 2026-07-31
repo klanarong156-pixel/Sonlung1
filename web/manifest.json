@@ -14,13 +14,13 @@
   ],
   "screenshots": [
     {
-      "src": "./web/suanlungna_icon_512.png",
+      "src": "suanlungna_icon_512.png",
       "sizes": "512x512",
       "type": "image/png",
       "form_factor": "wide"
     },
     {
-      "src": "./web/suanlungna_icon_180.png",
+      "src": "suanlungna_icon_180.png",
       "sizes": "180x180",
       "type": "image/png",
       "form_factor": "narrow"
@@ -28,13 +28,13 @@
   ],
   "icons": [
     {
-      "src": "./web/suanlungna_icon_180.png",
+      "src": "suanlungna_icon_180.png",
       "sizes": "180x180",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "./web/suanlungna_icon_512.png",
+      "src": "suanlungna_icon_512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
@@ -48,7 +48,7 @@
       "url": "./index.html?mode=pump",
       "icons": [
         {
-          "src": "./web/suanlungna_icon_180.png",
+          "src": "suanlungna_icon_180.png",
           "sizes": "180x180"
         }
       ]
@@ -60,7 +60,7 @@
       "url": "./index.html?mode=schedule",
       "icons": [
         {
-          "src": "./web/suanlungna_icon_180.png",
+          "src": "suanlungna_icon_180.png",
           "sizes": "180x180"
         }
       ]

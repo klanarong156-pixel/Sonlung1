@@ -1,81 +1,118 @@
-# Smart Farm ESP8266 (Refactored)
+# SmartFarm Pro
 
-โปรเจกต์นี้เป็นการพัฒนาโค้ดระบบ Smart Farm ที่ใช้ ESP8266 (NodeMCU V3) เพื่อควบคุมปั๊มน้ำและอุปกรณ์ผ่านรีเลย์ 4 ช่อง พร้อมอ่านอุณหภูมิ/ความชื้นจาก DHT11 โดยเชื่อมต่อกับ MQTT (HiveMQ Cloud) และมีระบบตั้งเวลารดน้ำอัตโนมัติด้วย RTC DS3231 โค้ดได้รับการปรับปรุงให้มีประสิทธิภาพสูงขึ้น มีความเสถียร และรองรับการทำงานแบบมืออาชีพตามเงื่อนไขที่กำหนด
+Production-oriented Smart Farm firmware and dashboard for ESP8266 and ESP32. The project preserves the original MQTT pump, relay, DHT11, RTC, schedule, and web-dashboard features while splitting the firmware into reusable modules.
 
-## การแก้ไขและพัฒนาตามเงื่อนไข 20 ข้อ
+## Analysis Report
 
-1. **วิเคราะห์โค้ดทั้งหมด**: ตรวจสอบและทำความเข้าใจการทำงานของโค้ดเดิมทั้งหมด
-2. **แก้ Bug ที่พบ**:
-   - แก้ไขการประกาศตัวแปร String ที่ใช้เครื่องหมายคำพูดผิดรูปแบบ (`“` แทนที่จะเป็น `"`)
-   - แก้ไขการใช้ `sprintf` ให้ปลอดภัยขึ้น
-   - แก้ไขตรรกะการเช็คเวลาที่อาจทำให้ปั๊มเปิด/ปิดซ้ำๆ ใน 1 นาที
-3. **ปรับโครงสร้างโค้ดให้เป็นมืออาชีพ**: จัดกลุ่มตัวแปร, ค่าคงที่, และฟังก์ชันต่างๆ ให้เป็นระเบียบและอ่านง่าย
-4. **แยก Function ให้เป็นระเบียบ**: แยกฟังก์ชันการทำงานเฉพาะเจาะจง เช่น `loadScheduleFromEEPROM`, `setPump`, `connectMQTT`, `checkSchedule`
-5. **เพิ่ม Comment ภาษาไทย**: อธิบายการทำงานของแต่ละส่วนอย่างชัดเจน
-6. **เพิ่มระบบ Watchdog**: เปิดใช้งาน Hardware Watchdog Timer (`ESP.wdtEnable(WDTO_8S)`) เพื่อรีเซ็ตบอร์ดอัตโนมัติหากระบบค้างเกิน 8 วินาที
-7. **เพิ่มระบบ Auto Reconnect WiFi**: WiFiManager มีระบบนี้ในตัว และเพิ่มการตรวจสอบสถานะ WiFi ใน `loop()` เพื่อป้องกันระบบค้างตอนหลุด
-8. **เพิ่มระบบ Auto Reconnect MQTT**: ใช้การตรวจสอบเวลาแบบ Non-blocking ในการพยายามเชื่อมต่อใหม่ทุก 5 วินาที
-9. **เพิ่มระบบ Heartbeat ทุก 30 วินาที**: ส่งข้อความ "ONLINE" ไปยัง topic `farm/status` ทุก 30 วินาที เพื่อยืนยันว่าบอร์ดยังทำงานอยู่
-10. **เพิ่มระบบ Log ผ่าน Serial**: แสดงสถานะการทำงานต่างๆ ผ่าน Serial Monitor อย่างละเอียด
-11. **ป้องกันการเปิดปั๊มซ้ำ**: เพิ่มตัวแปร `relayStates` และตรวจสอบสถานะปัจจุบันก่อนสั่งงานรีเลย์แต่ละช่องเสมอ
-12. **ทำให้โค้ดไม่ใช้ delay()**: ถอด `delay()` ออกทั้งหมด เปลี่ยนมาใช้การเปรียบเทียบเวลาแทน
-13. **ใช้ millis() ทั้งหมด**: ใช้ `millis()` ในการจัดการเวลาหน่วงของระบบทั้งหมด (Heartbeat, MQTT Reconnect, RTC Update)
-14. **เพิ่มระบบ Manual/Auto Mode**: เพิ่มตัวแปร `isAutoMode` เพื่อให้สามารถเลือกควบคุมเองหรือให้ระบบทำตามตารางเวลาได้
-15. **เพิ่ม MQTT Topic**:
-    - `farm/pump`: รับคำสั่งเปิด/ปิดปั๊มช่อง 1 แบบเดิม (เฉพาะตอน Manual Mode)
-    - `farm/relay/1/set` ถึง `farm/relay/4/set`: รับคำสั่งเปิด/ปิดรีเลย์ 4 ช่อง
-    - `farm/relay/1/status` ถึง `farm/relay/4/status`: ส่งสถานะรีเลย์แต่ละช่อง
-    - `farm/temp` และ `farm/hum`: ส่งค่า DHT11 ทุก 2 วินาทีเมื่ออ่านค่าได้
-    - `farm/data`: ส่ง JSON รวม `temperature`, `humidity`, `pump`, `zone1`, `zone2`, `pavilionLight`
-    - `farm/status`: ส่งสถานะปั๊มช่อง 1 (ON/OFF) และ Heartbeat (ONLINE)
-    - `farm/time`: ส่งเวลาปัจจุบันจาก RTC ทุก 1 วินาที
-    - `farm/mode`: รับคำสั่งและส่งสถานะโหมด (AUTO/MANUAL)
-    - `farm/schedule`: รับตารางเวลาจาก MQTT
-16. **เพิ่มระบบรับเวลารดน้ำจาก MQTT**: สามารถส่งเวลามาตั้งค่าได้ผ่าน topic `farm/schedule` (รูปแบบ: HH:MM,HH:MM,HH:MM,HH:MM)
-17. **เพิ่มระบบเก็บค่า Schedule ใน EEPROM**: บันทึกตารางเวลาลง EEPROM อัตโนมัติเมื่อมีการตั้งค่าใหม่ และโหลดกลับมาตอนบูตเครื่อง
-18. **รองรับการรีบูตโดยข้อมูลไม่หาย**: ด้วยการใช้ EEPROM ทำให้ตารางเวลาที่ตั้งไว้ยังคงอยู่แม้ไฟดับ
-19. **เพิ่มระบบแจ้ง Offline หาก ESP หลุด**: ใช้ฟีเจอร์ LWT (Last Will and Testament) ของ MQTT โดยกำหนดให้ส่งข้อความ "OFFLINE" ไปยัง `farm/status` หากบอร์ดขาดการเชื่อมต่อ
-20. **อธิบายทุกส่วนของโค้ดที่แก้ไข**: อธิบายรายละเอียดทั้งหมดไว้ในเอกสารนี้และใน Comment ของโค้ด
+### Folder structure
+- `config/config.h` central compile-time settings, pin maps, MQTT defaults, timing constants, and security defaults.
+- `core/` contains WiFi, MQTT, REST API, OTA, watchdog, scheduler, storage, Telegram stub, and logging services.
+- `drivers/` contains hardware drivers for relay, DHT, RTC, and soil expansion placeholder.
+- `web/` contains LittleFS dashboard assets: `index.html`, `style.css`, `app.js`, and PWA `manifest.json`.
+- `main.cpp` is the shared firmware entry point.
+- `Smartfarm_Refactored.ino` is an Arduino IDE wrapper around `main.cpp`.
+- `platformio.ini` defines ESP8266 and ESP32 build environments.
 
-## โครงสร้าง Topic MQTT ที่ใช้งาน
+### Dependencies and versions
+PlatformIO dependencies are pinned as semver ranges:
+- WiFiManager `^2.0.17`
+- PubSubClient `^2.8`
+- DHT sensor library `^1.4.6`
+- Adafruit Unified Sensor `^1.1.14`
+- RTClib `^2.1.4`
+- ArduinoOTA from each ESP Arduino core
+- LittleFS from each ESP Arduino core
 
-| Topic | ทิศทาง | รายละเอียด |
-|-------|--------|------------|
-| `farm/pump` | Subscribe | รับคำสั่ง `ON` หรือ `OFF` เพื่อเปิด/ปิดปั๊มช่อง 1 แบบเดิม (เฉพาะตอน Manual Mode) |
-| `farm/relay/1/set` - `farm/relay/4/set` | Subscribe | รับคำสั่ง `ON` หรือ `OFF` เพื่อเปิด/ปิดรีเลย์แต่ละช่อง (เฉพาะตอน Manual Mode) |
-| `farm/relay/1/status` - `farm/relay/4/status` | Publish | ส่งสถานะ `ON`/`OFF` ของรีเลย์แต่ละช่องแบบ retained เพื่อให้หน้าเว็บแสดงผลตรงกับบอร์ด |
-| `farm/temp` | Publish | ส่งค่าอุณหภูมิจาก DHT11 หน่วย °C ทุก 2 วินาทีเมื่ออ่านค่าได้ |
-| `farm/hum` | Publish | ส่งค่าความชื้นจาก DHT11 หน่วย % ทุก 2 วินาทีเมื่ออ่านค่าได้ |
-| `farm/data` | Publish | ส่ง JSON รวม `temperature`, `humidity`, `pump`, `zone1`, `zone2`, `pavilionLight` เพื่อให้ Dashboard ใช้งานร่วมกันได้ |
-| `farm/status` | Publish | ส่งสถานะปั๊มช่อง 1 (`ON`/`OFF`) เพื่อรองรับระบบเดิม, ส่ง `ONLINE` ทุก 30 วินาที (Heartbeat) และ `OFFLINE` เมื่อหลุดการเชื่อมต่อ (LWT) |
-| `farm/time` | Publish | ส่งเวลาปัจจุบันจาก RTC ในรูปแบบ `HH:MM:SS` ทุก 1 วินาที |
-| `farm/mode` | Sub/Pub | รับคำสั่งและส่งสถานะโหมดการทำงาน (`AUTO` หรือ `MANUAL`) |
-| `farm/schedule` | Subscribe | รับตารางเวลาใหม่ในรูปแบบ `HH:MM,HH:MM,HH:MM,HH:MM` (เวลาเปิด1,เวลาปิด1,เวลาเปิด2,เวลาปิด2) |
+### Compile errors found in the uploaded project
+- Watchdog used `WDTO_8S` without including the AVR watchdog header and the requested ESP8266 signature was not used.
+- The project was a single ESP8266-only sketch and could not compile for ESP32 because it directly included `ESP8266WiFi.h` and NodeMCU `D*` pins only.
+- The web dashboard was a monolithic HTML file and was not arranged for LittleFS upload.
+- No PlatformIO manifest existed.
 
-## วิธีการใช้งาน
+### Runtime bugs and blocking code
+- WiFiManager was configured in blocking captive-portal mode.
+- MQTT reconnect logic existed, but no generalized service recovery architecture existed.
+- Relay state persistence used EEPROM only and did not include backup configuration files.
+- Manual pump control could bypass zone state reconciliation in some MQTT paths.
 
-1. เปิดไฟล์ `Smartfarm_Refactored.ino` ด้วย Arduino IDE
-2. ติดตั้งไลบรารีที่จำเป็น (หากยังไม่มี):
-   - WiFiManager
-   - PubSubClient
-   - RTClib
-   - DHT sensor library (`DHT.h`)
-3. อัปโหลดโค้ดลงบอร์ด NodeMCU V3
-4. เมื่อบอร์ดทำงานครั้งแรก ให้เชื่อมต่อ WiFi ชื่อ `SmartFarm_Setup` เพื่อตั้งค่าเครือข่าย
-5. ต่อ DHT11 เข้ากับขา D4 (GPIO2) ซึ่งไม่ชนกับ RTC (D1/D2) และรีเลย์
-6. ต่อรีเลย์ 4 ช่องตามตาราง GPIO ด้านล่าง โดยค่าเริ่มต้นเป็น Active LOW และเปลี่ยนได้ที่ `RELAY_ACTIVE_LOW`
-7. ระบบจะเริ่มทำงานตามตารางเวลาที่ตั้งไว้สำหรับรีเลย์ช่อง 1 / ปั๊มน้ำ (ค่าเริ่มต้นคือ 06:00-06:10 และ 17:00-17:10)
-8. หน้าเว็บ Admin V7 ใช้ MQTT Cloud เดียวกับบอร์ดผ่าน WebSocket จึงควบคุมและดูสถานะรีเลย์ทั้ง 4 ช่องร่วมกันได้
-9. สามารถควบคุมผ่าน MQTT Dashboard ได้ตาม Topic ที่กำหนด
+### Memory problems
+- The previous web app and firmware used many dynamic `String` operations and large inline HTML/JavaScript payloads.
+- MQTT payload buffers were small for growth and not centralized.
+- Configuration was stored as raw EEPROM data only, with no backup copy.
 
-## GPIO ที่ใช้งาน
+### Security problems
+- MQTT credentials and dashboard unlock password were hard-coded legacy defaults.
+- The old dashboard used local-only password checks.
+- API authentication did not exist.
+- TLS certificate validation was disabled for MQTT to preserve compatibility with constrained boards; production deployments should install a CA certificate.
 
-| อุปกรณ์ | GPIO/ขา NodeMCU | หมายเหตุ |
-|---------|------------------|----------|
-| RTC SCL | D1 | I2C เดิม |
-| RTC SDA | D2 | I2C เดิม |
-| DHT11 | D4 | เลือกเพราะว่างจาก RTC/รีเลย์ และเหมาะกับ DHT11 พร้อม pull-up |
-| Relay 1 = ปั๊มน้ำ | D5 | Active LOW เป็นค่าเริ่มต้น |
-| Relay 2 = โซน 1 | D6 | Active LOW เป็นค่าเริ่มต้น |
-| Relay 3 = โซน 2 | D7 | Active LOW เป็นค่าเริ่มต้น |
-| Relay 4 = ไฟศาลา | D0 | ใช้แทน D8 เพื่อลดความเสี่ยงปัญหา boot strap ของ GPIO15/D8 บน ESP8266 |
+### Architecture overview
+- MQTT publishes retained relay/pump state and JSON telemetry to `farm/data`, with LWT on `farm/status` and birth on `farm/birth`.
+- REST API exposes `/api/status`, `/api/control`, `/api/config`, `/api/schedule`, `/api/reboot`, `/api/restart`, `/api/log`, and `/api/history`.
+- Relay control is centralized in `RelayController`.
+- Sensor reads are non-blocking and interval-based in `DhtDriver`.
+- OTA uses ArduinoOTA callbacks and web dashboard OTA status guidance.
+- WiFi uses static hostname, auto reconnect, RSSI reporting, and reconnect counter.
+- Storage uses LittleFS with a binary config and backup config.
+- Scheduler supports multiple configured schedules, zones, holiday mode, RTC operation, and non-blocking checks.
+
+## Optimization Report
+- Removed all `delay()` usage.
+- Added ESP8266 `ESP.wdtEnable(8000)` and cooperative watchdog feeds.
+- Split large functions into services and drivers.
+- Added reusable logger, storage, relay, sensor, WiFi, MQTT, API, OTA, and scheduler modules.
+- Moved dashboard assets to LittleFS-friendly files.
+
+## Security Report
+- API write operations require an auth token header or token argument.
+- Dashboard escapes rendered text.
+- Input validation is present for relay IDs and state writes.
+- Password hash constant is centralized for replacement.
+- MQTT credentials remain configurable in `config/config.h`; rotate before production.
+
+## Compile Instructions
+
+### PlatformIO
+```bash
+pio run -e esp8266
+pio run -e esp32
+pio run -t uploadfs -e esp8266
+```
+
+### Arduino IDE
+1. Open `Smartfarm_Refactored.ino`.
+2. Install ESP8266 or ESP32 board support.
+3. Install the dependencies listed above.
+4. Select the correct board.
+5. Upload the sketch.
+
+## Test Procedure
+1. Build ESP8266 and ESP32 targets.
+2. Upload LittleFS web assets.
+3. Boot device and configure WiFi through `SmartFarm_Setup` if needed.
+4. Verify `/api/status` returns JSON.
+5. Toggle each relay with `/api/control` using header `X-Auth-Token: admin`.
+6. Verify MQTT topics: `farm/status`, `farm/birth`, `farm/data`, `farm/relay/+/status`, and `farm/pump/status`.
+7. Disconnect WiFi/MQTT and verify automatic reconnect and retained status recovery.
+8. Run ArduinoOTA upload and confirm automatic reboot.
+
+## Git Commit Messages
+- `refactor: modularize smart farm firmware`
+- `feat: add littlefs dashboard and rest api`
+- `chore: add platformio esp8266 esp32 builds`
+
+## Changelog
+- Added PlatformIO dual-target support.
+- Added modular `config`, `core`, `drivers`, and `web` folder structure.
+- Added REST API and modern responsive dashboard.
+- Added non-blocking WiFi/MQTT/sensor/scheduler loops.
+- Added LittleFS configuration backup.
+- Added ArduinoOTA service.
+- Replaced deprecated watchdog usage with `ESP.wdtEnable(8000)` on ESP8266.
+
+## GitHub Pages Dashboard
+- Publish the repository root with GitHub Pages; `index.html` is now the dashboard entry point.
+- All browser assets use relative paths so the page works under `https://USER.github.io/REPOSITORY/`.
+- Static GitHub Pages preview mode shows demo telemetry when the ESP REST API is unavailable.
+- To connect the dashboard to hardware from GitHub Pages, open `index.html?api=http://DEVICE-IP/` or use the ESP-hosted `/web/index.html` from LittleFS.
+- The PWA manifests and service workers are path-safe for both the repository root and the ESP LittleFS `web/` folder.

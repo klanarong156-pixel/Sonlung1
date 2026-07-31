@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>SmartFarm Pro</title>
-  <!-- GitHub Pages can be hosted from a repository sub-path, so all assets use relative URLs. -->
+  <!-- Relative URLs keep the dashboard working from ESP LittleFS, GitHub Pages root, or /web/. -->
   <link rel="manifest" href="./manifest.json">
-  <link rel="stylesheet" href="./web/style.css">
+  <link rel="stylesheet" href="./style.css">
 </head>
 <body>
   <header class="top">
@@ -34,7 +34,7 @@
       <p>RSSI <b id="rssi">--</b></p>
       <p>Heap <b id="heap">--</b></p>
       <p>Uptime <b id="uptime">--</b></p>
-      <p id="offlineNote" class="muted hidden">GitHub Pages preview mode is active because the ESP REST API is not reachable from this origin.</p>
+      <p id="offlineNote" class="muted hidden">Preview mode is active because the ESP REST API is not reachable from this origin.</p>
     </section>
     <section class="card">
       <h2>Configuration</h2>
@@ -43,6 +43,6 @@
     </section>
   </main>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="./web/app.js" defer></script>
+  <script src="./app.js" defer></script>
 </body>
 </html>
